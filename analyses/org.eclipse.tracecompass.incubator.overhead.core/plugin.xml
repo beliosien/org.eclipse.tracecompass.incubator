@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.4"?>
+<plugin>
+   <extension
+         point="org.eclipse.ui.views">
+      <view
+            category="org.eclipse.linuxtools.tmf.ui.views.category"
+            class="org.eclipse.tracecompass.incubator.overhead.ui.EventDensityView"
+            id="org.eclipse.overhead.incubator.ui.views.eventdensity"
+            name="Kvm Exit Density View"
+            restorable="true">
+      </view>
+   </extension>
+   <extension
+         point="org.eclipse.linuxtools.tmf.core.analysis">
+      <module
+            analysis_module="org.eclipse.tracecompass.incubator.internal.overhead.core.analysis.KvmExitAnalysisModule"
+            automatic="false"
+            id="org.eclipse.tracecompass.incubator.overhead.state.system.module"
+            name="Exit Analysis">
+         <tracetype
+               class="org.eclipse.tracecompass.tmf.core.trace.TmfTrace">
+         </tracetype>
+      </module>
+      <output
+            class="org.eclipse.tracecompass.tmf.ui.analysis.TmfAnalysisViewOutput"
+            id="org.eclipse.overhead.incubator.ui.views.eventdensity">
+         <analysisId
+               id="org.eclipse.tracecompass.incubator.overhead.state.system.module">
+         </analysisId>
+      </output>
+   </extension>
+   <extension
+         point="org.eclipse.tracecompass.tmf.core.dataprovider">
+      <dataProviderFactory
+            class="org.eclipse.tracecompass.incubator.overhead.core.data.provider.KvmExitDataProviderFactory"
+            id="org.eclipse.incubator.overhead.xy.rate.dataprovider">
+      </dataProviderFactory>
+   </extension>
+
+</plugin>
