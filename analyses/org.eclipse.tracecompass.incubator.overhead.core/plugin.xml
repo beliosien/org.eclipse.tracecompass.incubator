@@ -10,6 +10,20 @@
             name="Kvm Exit Density View"
             restorable="true">
       </view>
+      <view
+            category="org.eclipse.linuxtools.tmf.ui.views.category"
+            class="org.eclipse.tracecompass.incubator.overhead.ui.VMNativeComparisonView"
+            id="org.eclipse.tracecompass.analysis.vmcomparison.ui.view"
+            name="Comparison View"
+            restorable="true">
+      </view>
+   </extension>
+   <extension
+         point="org.eclipse.tracecompass.tmf.core.dataprovider">
+      <dataProviderFactory
+            class="org.eclipse.tracecompass.incubator.overhead.core.data.provider.KvmExitDataProviderFactory"
+            id="org.eclipse.incubator.overhead.xy.rate.dataprovider">
+      </dataProviderFactory>
    </extension>
    <extension
          point="org.eclipse.linuxtools.tmf.core.analysis">
@@ -29,13 +43,21 @@
                id="org.eclipse.tracecompass.incubator.overhead.state.system.module">
          </analysisId>
       </output>
-   </extension>
-   <extension
-         point="org.eclipse.tracecompass.tmf.core.dataprovider">
-      <dataProviderFactory
-            class="org.eclipse.tracecompass.incubator.overhead.core.data.provider.KvmExitDataProviderFactory"
-            id="org.eclipse.incubator.overhead.xy.rate.dataprovider">
-      </dataProviderFactory>
+      <module
+            analysis_module="org.eclipse.tracecompass.incubator.internal.overhead.core.analysis.VMNativeComparisonAnalysis"
+            id="org.eclipse.tracecompass.analysis.vmcomparison"
+            name="VM vs Native Comparison">
+         <tracetype
+               class="org.eclipse.tracecompass.tmf.core.trace.TmfTrace">
+         </tracetype>
+      </module>
+      <output
+            class="org.eclipse.tracecompass.tmf.ui.analysis.TmfAnalysisViewOutput"
+            id="org.eclipse.tracecompass.analysis.vmcomparison.ui.view">
+         <analysisId
+               id="org.eclipse.tracecompass.analysis.vmcomparison">
+         </analysisId>
+      </output>
    </extension>
 
 </plugin>

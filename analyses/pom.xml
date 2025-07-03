@@ -59,6 +59,10 @@
     <module>org.eclipse.tracecompass.incubator.gpu</module>
     <module>org.eclipse.tracecompass.incubator.gpu.core</module>
     <module>org.eclipse.tracecompass.incubator.gpu.core.tests</module>
+    <module>org.eclipse.tracecompass.incubator.overhead</module>
+    <module>org.eclipse.tracecompass.incubator.overhead.core</module>
+    <module>org.eclipse.tracecompass.incubator.overhead.core.tests</module>
+    <module>org.eclipse.tracecompass.incubator.overhead.ui</module>
     <!-- insert modules here -->
   </modules>
 
