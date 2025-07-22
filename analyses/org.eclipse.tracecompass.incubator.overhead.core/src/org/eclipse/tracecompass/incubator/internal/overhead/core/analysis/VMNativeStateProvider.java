@@ -6,8 +6,13 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.eclipse.jdt.annotation.NonNull;
 import org.eclipse.tracecompass.statesystem.core.ITmfStateSystemBuilder;
 import org.eclipse.tracecompass.tmf.core.event.ITmfEvent;
+import org.eclipse.tracecompass.tmf.core.request.ITmfEventRequest;
+import org.eclipse.tracecompass.tmf.core.request.TmfEventRequest;
 import org.eclipse.tracecompass.tmf.core.statesystem.AbstractTmfStateProvider;
 import org.eclipse.tracecompass.tmf.core.statesystem.ITmfStateProvider;
+import org.eclipse.tracecompass.tmf.core.timestamp.ITmfTimestamp;
+import org.eclipse.tracecompass.tmf.core.timestamp.TmfTimeRange;
+import org.eclipse.tracecompass.tmf.core.timestamp.TmfTimestamp;
 import org.eclipse.tracecompass.tmf.core.trace.ITmfTrace;
 import org.eclipse.tracecompass.tmf.core.trace.experiment.TmfExperiment;
 
@@ -22,8 +27,11 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
 
     /** State system attributes */
     public static final String NATIVE_ROOT = "Native"; //$NON-NLS-1$
+    @SuppressWarnings("javadoc")
     public static final String VM_ROOT = "VM";  //$NON-NLS-1$
+    @SuppressWarnings("javadoc")
     public static final String SYNC_POINTS = "SyncPoints"; //$NON-NLS-1$
+    @SuppressWarnings("javadoc")
     public static final String PERFORMANCE_DELTA = "PerformanceDelta"; //$NON-NLS-1$
 
     private final Map<String, TraceContext> traceContexts = new HashMap<>();
@@ -31,6 +39,28 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
     private final AtomicLong eventCounter = new AtomicLong(0);
 
     private static final String WORKLOAD_UST_PROVIDER = "workload_provider"; //$NON-NLS-1$
+
+    private static final String PID = "context._vpid"; //$NON-NLS-1$
+    private static final String TID = "context._vtid"; //$NON-NLS-1$
+
+
+    /** Rate event analysis **/
+    // Global event counters
+    private final static Map<String, Integer> nativeEventCounts = new HashMap<>();
+    private final static Map<String, Integer> vmEventCounts = new HashMap<>();
+
+    // Phase-counters
+    private final static Map<String, Map<String, Integer>> nativePhaseEventCounts = new HashMap<>();
+    private final static Map<String, Map<String, Integer>> vmPhaseEventCounts = new HashMap<>();
+
+    // Phase tracking per trace
+    private static String currentNativePhase = null;
+    private static String currentVmPhase = null;
+
+
+    // flow analysis
+    private final static Map<Integer, List<KernelEventInfo>> eventsById = new HashMap<>();
+
 
     /**
      * Constructor
@@ -58,11 +88,14 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
     }
 
     private static TraceType determineTraceType(String traceName) {
-        // Corrected typo: "native"
-        if (traceName.toLowerCase().contains("native")) { //$NON-NLS-1$
-            return TraceType.NATIVE;
-        } else if (traceName.toLowerCase().contains("guest")) { //$NON-NLS-1$
-            return TraceType.VM_GUEST;
+        if (traceName.toLowerCase().contains("native/kernel")) { //$NON-NLS-1$
+            return TraceType.NATIVE_KERNEL;
+        } else if (traceName.toLowerCase().contains("native/ust")){ //$NON-NLS-1$
+            return TraceType.NATIVE_UST;
+        } else if (traceName.toLowerCase().contains("guest/kernel")) { //$NON-NLS-1$
+            return TraceType.VM_GUEST_KERNEL;
+        } else if (traceName.toLowerCase().contains("guest/ust")) { //$NON-NLS-1$
+            return TraceType.VM_GUEST_UST;
         } else if (traceName.toLowerCase().contains("host")) { //$NON-NLS-1$
             return TraceType.VM_HOST;
         }
@@ -94,6 +127,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 return;
             }
 
+
             if (isWorkloadEvent(event)) {
                 handleWorkloadEvent(event, context, ss);
             } else if (isKernelEvent(event)) {
@@ -104,6 +138,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
             System.err.println("Error processing event: " + e.getMessage()); //$NON-NLS-1$
         }
     }
+
 
     private static boolean isWorkloadEvent(ITmfEvent event) {
         String eventName = event.getType().getName();
@@ -118,6 +153,97 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 eventName.startsWith("mm_"); //$NON-NLS-1$
     }
 
+    /**
+     * @param trace
+     * @return
+     * @throws InterruptedException
+     */
+    public static List<ITmfEvent> getAllEvents(ITmfTrace trace) throws InterruptedException {
+        List<ITmfEvent> events = new ArrayList<>();
+        ITmfEventRequest request = new TmfEventRequest(
+            ITmfEvent.class,
+            0, // index
+            ITmfEventRequest.ALL_DATA,
+            ITmfEventRequest.ExecutionType.FOREGROUND
+        ) {
+            @Override
+            public void handleData(ITmfEvent event) {
+                events.add(event);
+            }
+        };
+        trace.sendRequest(request);
+        request.waitForCompletion();
+        return events;
+    }
+
+
+ // Méthode utilitaire pour extraire les kernel events entre deux timestamps
+    private static List<KernelEventInfo> extractKernelEventsBetween(
+            ITmfTrace trace,
+            long startNanos,
+            long endNanos
+    ) throws InterruptedException {
+        List<KernelEventInfo> result = new ArrayList<>();
+
+        ITmfTimestamp startTs = TmfTimestamp.fromNanos(startNanos);
+        ITmfTimestamp endTs = TmfTimestamp.fromNanos(endNanos);
+        TmfTimeRange range = new TmfTimeRange(startTs, endTs);
+
+        ITmfEventRequest req = new TmfEventRequest(
+            ITmfEvent.class,
+            range,
+            0,
+            ITmfEventRequest.ALL_DATA,
+            ITmfEventRequest.ExecutionType.FOREGROUND
+        ) {
+            @Override
+            public void handleData(ITmfEvent event) {
+                long ts = event.getTimestamp().toNanos();
+                if (ts < startNanos || ts > endNanos) {
+                    return;
+                }
+                String name = event.getType().getName();
+                if (isKernelEvent(event)) {
+                    Integer pid = getIntField(event, PID);
+                    Integer tid = getIntField(event, TID);
+                    result.add(new KernelEventInfo(
+                        name,
+                        ts,
+                        pid != null ? pid : -1,
+                        tid != null ? tid : -1
+                    ));
+                }
+            }
+        };
+        trace.sendRequest(req);
+        req.waitForCompletion();
+        return result;
+    }
+
+
+    // get the field PID/TID
+    private static Integer getIntField(ITmfEvent event, String fieldName) {
+        Object obj = event.getContent().getField(fieldName);
+        if (obj == null) {
+            return null;
+        }
+
+        String value = obj.toString();
+        String[] words = value.split("="); //$NON-NLS-1$
+        if (words.length == 0 || words.length > 2) {
+            return null;
+        }
+
+        try {
+            return Integer.parseInt(words[1]);
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+
+
+
     private void handleWorkloadEvent(ITmfEvent event, TraceContext context, ITmfStateSystemBuilder ss) {
         try {
             String eventName = event.getType().getName();
@@ -129,6 +255,23 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
             }
 
             String workloadEventType = parts[1];
+            if (workloadEventType.endsWith("_start")) { //$NON-NLS-1$
+                String phase = extractPhase(workloadEventType);
+                if (context.type == TraceType.NATIVE_UST) {
+                    currentNativePhase = phase;
+                }
+                if (context.type == TraceType.VM_GUEST_UST) {
+                    currentVmPhase = phase;
+                }
+            } else if (workloadEventType.endsWith("_end")) { //$NON-NLS-1$
+                if (context.type == TraceType.NATIVE_UST) {
+                    currentNativePhase = null;
+                }
+                if (context.type == TraceType.VM_GUEST_UST) {
+                    currentVmPhase = null;
+                }
+            }
+
 
             // Get event data
             Integer dataValue = null;
@@ -166,17 +309,44 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         }
     }
 
+    @SuppressWarnings("null")
     private static void handleKernelEvent(ITmfEvent event, TraceContext context, ITmfStateSystemBuilder ss) {
         try {
-            String eventName = event.getType().getName();
+                String eventName = event.getType().getName();
+                String eventClass = null;
 
-            if (eventName.startsWith("syscall_entry_")) { //$NON-NLS-1$
-                handleSyscallEntry(event, context, ss);
-            } else if (eventName.startsWith("syscall_exit_")) { //$NON-NLS-1$
-                handleSyscallExit(event, context, ss);
-            } else if (eventName.startsWith("sched_switch")) { //$NON-NLS-1$
-                handleSchedulerSwitch(event, context, ss);
-            }
+                if (eventName.startsWith("syscall_entry_")) { //$NON-NLS-1$
+                    eventClass = "syscall"; //$NON-NLS-1$
+                    handleSyscallEntry(event, context, ss);
+                } else if (eventName.startsWith("syscall_exit_")) { //$NON-NLS-1$
+                    eventClass = "syscall"; //$NON-NLS-1$
+                    handleSyscallExit(event, context, ss);
+                } else if (eventName.startsWith("sched_switch")) { //$NON-NLS-1$
+                    eventClass = "context_switch"; //$NON-NLS-1$
+                    handleSchedulerSwitch(event, context, ss);
+                } else if (eventName.startsWith("mm_page_fault")) { //$NON-NLS-1$
+                    eventClass = "page_fault"; //$NON-NLS-1$
+                }
+
+                // add to the appropriate table
+                if (eventClass != null) {
+                    if (context.type == TraceType.NATIVE_KERNEL) {
+                        nativeEventCounts.merge(eventClass, 1, Integer::sum);
+                        if (currentNativePhase != null) {
+                            nativePhaseEventCounts
+                            .computeIfAbsent(currentNativePhase, k -> new HashMap<>())
+                            .merge(eventClass, 1, Integer::sum);
+                        }
+                    } else if (context.type == TraceType.VM_GUEST_KERNEL) {
+                        vmEventCounts.merge(eventClass, 1, Integer::sum);
+                        if (currentVmPhase != null) {
+                            vmPhaseEventCounts
+                                .computeIfAbsent(currentVmPhase, k -> new HashMap<>())
+                                .merge(eventClass, 1, Integer::sum);
+                        }
+                    }
+                }
+
         } catch (Exception e) {
             System.err.println("Error handling kernel event: " + e.getMessage()); //$NON-NLS-1$
         }
@@ -242,17 +412,17 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
     }
 
     private static String getWorkloadAttributePath(TraceType type, String eventType) {
-        String root = (type == TraceType.NATIVE) ? NATIVE_ROOT : VM_ROOT;
+        String root = (type == TraceType.NATIVE_UST) ? NATIVE_ROOT : VM_ROOT;
         return root + "/Workload/" + eventType; //$NON-NLS-1$
     }
 
     private static String getSyscallAttributePath(TraceType type, String syscallName) {
-        String root = (type == TraceType.NATIVE) ? NATIVE_ROOT : VM_ROOT;
+        String root = (type == TraceType.NATIVE_KERNEL) ? NATIVE_ROOT : VM_ROOT;
         return root + "/Syscalls/" + syscallName; //$NON-NLS-1$
     }
 
     private static String getSchedulerAttributePath(TraceType type) {
-        String root = (type == TraceType.NATIVE) ? NATIVE_ROOT : VM_ROOT;
+        String root = (type == TraceType.NATIVE_KERNEL) ? NATIVE_ROOT : VM_ROOT;
         return root + "/Scheduler/switches"; //$NON-NLS-1$
     }
 
@@ -287,7 +457,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
     }
 
     private static String getPhaseAttributePath(TraceType type, String phase) {
-        String root = (type == TraceType.NATIVE) ? NATIVE_ROOT : VM_ROOT;
+        String root = (type == TraceType.NATIVE_UST) ? NATIVE_ROOT : VM_ROOT;
         return root + "/Phases/" + phase; //$NON-NLS-1$
     }
 
@@ -297,8 +467,39 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
 
     @Override
     public void done() {
+        rateEvent();
         correlateSyncPoints();
         super.done();
+    }
+
+    private void rateEvent() {
+        ITmfStateSystemBuilder ss = getStateSystemBuilder();
+        if (ss == null) {
+            return;
+        }
+
+        // globally
+        int eventRateRoot = ss.getQuarkAbsoluteAndAdd("EventRates"); //$NON-NLS-1$
+        for (String eventClass: List.of("syscall", "context_switch", "page_fault")) { //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            int natAttr = ss.getQuarkRelativeAndAdd(eventRateRoot, "native_" + eventClass); //$NON-NLS-1$
+            int vmAttr = ss.getQuarkRelativeAndAdd(eventRateRoot, "vm_" + eventClass); //$NON-NLS-1$
+            ss.modifyAttribute(ss.getCurrentEndTime(), nativeEventCounts.getOrDefault(eventClass, 0), natAttr);
+            ss.modifyAttribute(ss.getCurrentEndTime(), vmEventCounts.getOrDefault(eventClass, 0), vmAttr);
+        }
+
+        // By phase
+        int phaseRateRoot = ss.getQuarkAbsoluteAndAdd("EventRatesByPhase"); //$NON-NLS-1$
+        for (String phase: List.of("compute", "memory", "io")) { //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Map<String, Integer> natMap = nativePhaseEventCounts.getOrDefault(phase, Map.of());
+            Map<String, Integer> vmMap = vmPhaseEventCounts.getOrDefault(phase, Map.of());
+
+            for (String eventClass : List.of("syscall", "context_switch", "page_fault")) { //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                int natAttr = ss.getQuarkRelativeAndAdd(phaseRateRoot, phase + "_native_" + eventClass); //$NON-NLS-1$
+                int vmAttr = ss.getQuarkRelativeAndAdd(phaseRateRoot, phase + "_vm_" + eventClass); //$NON-NLS-1$
+                ss.modifyAttribute(ss.getCurrentEndTime(), natMap.getOrDefault(eventClass, 0), natAttr);
+                ss.modifyAttribute(ss.getCurrentEndTime(), vmMap.getOrDefault(eventClass, 0), vmAttr);
+            }
+        }
     }
 
     private void correlateSyncPoints() {
@@ -320,9 +521,9 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         Long vmWorkloadStart = null;
         for (SyncPoint point : syncPoints) {
             if ("workload_start".equals(point.eventType)) { //$NON-NLS-1$
-                if (point.traceType == TraceType.NATIVE) {
+                if (point.traceType == TraceType.NATIVE_UST) {
                     nativeWorkloadStart = point.timestamp;
-                } else if (point.traceType == TraceType.VM_GUEST) {
+                } else if (point.traceType == TraceType.VM_GUEST_UST) {
                     vmWorkloadStart = point.timestamp;
                 }
             }
@@ -343,9 +544,9 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 SyncPoint vmPoint = null;
 
                 for (SyncPoint point : points) {
-                    if (point.traceType == TraceType.NATIVE) {
+                    if (point.traceType == TraceType.NATIVE_UST) {
                         nativePoint = point;
-                    } else if (point.traceType == TraceType.VM_GUEST) {
+                    } else if (point.traceType == TraceType.VM_GUEST_UST) {
                         vmPoint = point;
                     }
                 }
@@ -362,15 +563,135 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                     String correlationData = String.format("native:%d,vm:%d,delta:%d,percent:%.2f", //$NON-NLS-1$
                             nativeElapsed, vmElapsed, deltaTime, deltaPercent);
 
-                    // maybe use this formula instead max(vmElapsed, nativeElapsed) + workload_start natif/VM pour le timestamp global
+                    // On utilise max(vmElapsed, nativeElapsed) + workload_start natif/VM pour le timestamp global
                     long correlationTime = Math.max(nativePoint.timestamp, vmPoint.timestamp);
                     ss.modifyAttribute(correlationTime, correlationData, attribute);
                 }
             }
+
+            // === Analyse par phase (compute, memory, io) ===
+            String[] phases = {"compute", "memory", "io"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            int phaseRoot = ss.getQuarkAbsoluteAndAdd("PhaseDurations"); //$NON-NLS-1$
+            for (String phase : phases) {
+                SyncPoint nativeStart = null, nativeEnd = null;
+                SyncPoint vmStart = null, vmEnd = null;
+
+                for (SyncPoint point : syncPoints) {
+                    if ((phase + "_start").equals(point.eventType)) { //$NON-NLS-1$
+                        if (point.traceType == TraceType.NATIVE_UST) {
+                            nativeStart = point;
+                        }
+                        if (point.traceType == TraceType.VM_GUEST_UST) {
+                            vmStart = point;
+                        }
+                    }
+                    if ((phase + "_end").equals(point.eventType)) { //$NON-NLS-1$
+                        if (point.traceType == TraceType.NATIVE_UST) {
+                            nativeEnd = point;
+                        }
+                        if (point.traceType == TraceType.VM_GUEST_UST) {
+                            vmEnd = point;
+                        }
+                    }
+                }
+
+                if (nativeStart != null && nativeEnd != null && vmStart != null && vmEnd != null) {
+
+                    long nativeDuration = nativeEnd.timestamp - nativeStart.timestamp;
+                    long vmDuration = vmEnd.timestamp - vmStart.timestamp;
+
+                    long deltaDuration = vmDuration - nativeDuration;
+                    double overheadPercent = nativeDuration == 0 ? 0.0 : ((double) deltaDuration / (double) nativeDuration) * 100.0;
+
+                    // Stocke dans le state system sous "PhaseDurations"
+                    int attr = ss.getQuarkRelativeAndAdd(phaseRoot, phase);
+                    String phaseData = String.format("native:%d,vm:%d,delta:%d,percent:%.2f", //$NON-NLS-1$
+                            nativeDuration, vmDuration, deltaDuration, overheadPercent);
+
+                    // Utilise la fin de la phase comme timestamp pour l'attribut
+                    long correlationTime = Math.max(nativeEnd.timestamp, vmEnd.timestamp);
+                    ss.modifyAttribute(correlationTime, phaseData, attr);
+                }
+
+
+                // flow analysis for the native system for now
+                if (nativeStart != null && nativeEnd != null) {
+                    // extracting events kernel between nativeStart and nativeEnd
+                    ITmfTrace nativeTrace = traceContexts.values().stream()
+                            .filter(ctx -> ctx.type == TraceType.NATIVE_KERNEL)
+                            .map(ctx -> ctx.trace)
+                            .findFirst()
+                            .orElse(null);
+
+                    if (nativeTrace != null) {
+                        List<KernelEventInfo> kernelEvents = extractKernelEventsBetween(
+                                nativeTrace,
+                                nativeStart.timestamp,
+                                nativeEnd.timestamp
+                                );
+
+                        // TODO save this in your state system for later
+                        for (KernelEventInfo evt : kernelEvents) {
+                            eventsById.computeIfAbsent(evt.tid, k -> new ArrayList<>()).add(evt);
+
+                            /*System.out.println(String.format("Native Phase=%s Event: %s @ %d PID=%d TID=%d", //$NON-NLS-1$
+                                    phase, evt.name, evt.timestamp, evt.pid, evt.tid));*/
+                        }
+
+                        for (Map.Entry<Integer, List<KernelEventInfo>> entry : eventsById.entrySet()) {
+                            int tid  = entry.getKey();
+                            List<KernelEventInfo> events  = entry.getValue();
+
+                            System.out.println("\n=== TID " + tid + " ==="); //$NON-NLS-1$ //$NON-NLS-2$
+
+                            Stack<KernelEventInfo> syscallStack = new Stack<>();
+                            for (KernelEventInfo evt : events) {
+                                if (evt.name.startsWith("syscall_entry")) { //$NON-NLS-1$
+                                    syscallStack.push(evt);
+                                } else if (evt.name.startsWith("syscall_exit") && !syscallStack.isEmpty()) { //$NON-NLS-1$
+                                    KernelEventInfo entryEvt = syscallStack.pop();
+                                    long duration = evt.timestamp - entryEvt.timestamp;
+                                    System.out.printf("Syscall: %s ➜ %s (%d µs)\n", entryEvt.name, evt.name, duration); //$NON-NLS-1$
+                                } else {
+                                    System.out.printf("Event: %s @ %d\n", evt.name, evt.timestamp); //$NON-NLS-1$
+                                }
+                            }
+                        }
+                    }
+                }
+
+
+                // flow analysis for the virtualized system
+                if (vmStart != null && vmEnd != null) {
+                 // extracting events kernel between vmStart and vmEnd
+                 ITmfTrace hostTrace = traceContexts.values().stream()
+                         .filter(ctx -> ctx.type == TraceType.VM_GUEST_KERNEL)
+                         .map(ctx -> ctx.trace)
+                         .findFirst()
+                         .orElse(null);
+
+
+                 if (hostTrace != null) {
+                     /*List<KernelEventInfo> kernelEvents = extractKernelEventsBetween(
+                             hostTrace,
+                             vmStart.timestamp,
+                             vmEnd.timestamp
+                             );*/
+
+                     // TODO save this in your state system for later
+                     /*for (KernelEventInfo evt : kernelEvents) {
+                         System.out.println(String.format("VM Phase=%s Event: %s @ %d PID=%d TID=%d", //$NON-NLS-1$
+                                 phase, evt.name, evt.timestamp, evt.pid, evt.tid));
+                     }*/
+                 }
+                }
+            }
+
         } catch (Exception e) {
             System.err.println("Error correlating sync points: " + e.getMessage()); //$NON-NLS-1$
         }
     }
+
 
     /**
      * Context information for each trace
@@ -402,12 +723,38 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         }
     }
 
+    /**
+    *
+    */
+   public static class KernelEventInfo {
+       public final String name;
+       public final long timestamp;
+       public final int pid;
+       public final int tid;
+
+       /**
+        * @param name
+        * @param timestamp
+        * @param pid
+        * @param tid
+        */
+       public KernelEventInfo(String name, long timestamp, int pid, int tid) {
+           this.name = name;
+           this.timestamp = timestamp;
+           this.pid = pid;
+           this.tid = tid;
+       }
+   }
+
+
     /*
      * Types of traces in the experiment
      */
     private enum TraceType{
-        NATIVE,
-        VM_GUEST,
+        NATIVE_KERNEL,
+        NATIVE_UST,
+        VM_GUEST_KERNEL,
+        VM_GUEST_UST,
         VM_HOST,
         UNKNOWN
     }
