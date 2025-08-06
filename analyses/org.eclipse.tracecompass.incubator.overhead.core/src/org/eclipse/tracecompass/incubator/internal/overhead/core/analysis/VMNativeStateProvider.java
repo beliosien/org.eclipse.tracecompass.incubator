@@ -2,6 +2,9 @@ package org.eclipse.tracecompass.incubator.internal.overhead.core.analysis;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Collectors;
 
 import org.eclipse.jdt.annotation.NonNull;
 import org.eclipse.tracecompass.statesystem.core.ITmfStateSystemBuilder;
@@ -20,7 +23,9 @@ import org.eclipse.tracecompass.tmf.core.trace.experiment.TmfExperiment;
  * State provider for VM/Native comparison analysis
  *
  * @author Francois Belias
+ *
  */
+// TODO A LOT of cleaning in this class
 public class VMNativeStateProvider extends AbstractTmfStateProvider{
     private static final int VERSION = 1;
     private static final String ID = "org.eclipse.tracecompass.incubator.vm.state.provider"; //$NON-NLS-1$
@@ -34,32 +39,36 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
     @SuppressWarnings("javadoc")
     public static final String PERFORMANCE_DELTA = "PerformanceDelta"; //$NON-NLS-1$
 
-    private final Map<String, TraceContext> traceContexts = new HashMap<>();
-    private final List<SyncPoint> syncPoints = new ArrayList<>();
+    private final static Map<String, TraceContext> traceContexts = new HashMap<>();
+    private final static List<SyncPoint> syncPoints = new ArrayList<>();
     private final AtomicLong eventCounter = new AtomicLong(0);
 
     private static final String WORKLOAD_UST_PROVIDER = "workload_provider"; //$NON-NLS-1$
 
     private static final String PID = "context._vpid"; //$NON-NLS-1$
     private static final String TID = "context._vtid"; //$NON-NLS-1$
+    private static final String PROCESS_NAME = "context._procname"; //$NON-NLS-1$
+    private static final String CPUID = "context.cpu_id"; //$NON-NLS-1$
+    private static final String VCPUID = "vcpu_id"; //$NON-NLS-1$
 
 
     /** Rate event analysis **/
     // Global event counters
-    private final static Map<String, Integer> nativeEventCounts = new HashMap<>();
-    private final static Map<String, Integer> vmEventCounts = new HashMap<>();
+    // private final static Map<String, Integer> nativeEventCounts = new HashMap<>();
+    // private final static Map<String, Integer> vmEventCounts = new HashMap<>();
 
     // Phase-counters
-    private final static Map<String, Map<String, Integer>> nativePhaseEventCounts = new HashMap<>();
-    private final static Map<String, Map<String, Integer>> vmPhaseEventCounts = new HashMap<>();
+    // private final static Map<String, Map<String, Integer>> nativePhaseEventCounts = new HashMap<>();
+    // private final static Map<String, Map<String, Integer>> vmPhaseEventCounts = new HashMap<>();
 
     // Phase tracking per trace
-    private static String currentNativePhase = null;
-    private static String currentVmPhase = null;
+    //private static String currentNativePhase = null;
+    // private static String currentVmPhase = null;
 
+    // for the flow analysis
+    // private final static Map<String, Map<String, List<KernelEventInfo>>> nativeEventsByPhaseAndName = new HashMap<>();
+    // private final static Map<String, Map<String, List<KernelEventInfo>>> vmEventsByPhaseAndName = new HashMap<>();
 
-    // flow analysis
-    private final static Map<Integer, List<KernelEventInfo>> eventsById = new HashMap<>();
 
 
     /**
@@ -77,7 +86,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         return VERSION;
     }
 
-    private void initializeTraceContexts(TmfExperiment experiment) {
+    private static void initializeTraceContexts(TmfExperiment experiment) {
         for (ITmfTrace trace: experiment.getTraces()) {
             String traceName = trace.getName();
             TraceType type  = determineTraceType(traceName);
@@ -134,8 +143,8 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 handleKernelEvent(event, context, ss);
             }
 
-        } catch (Exception e) {
-            System.err.println("Error processing event: " + e.getMessage()); //$NON-NLS-1$
+        } catch (Exception a) {
+            System.err.println("Error processing event: " + a.getMessage()); //$NON-NLS-1$
         }
     }
 
@@ -150,30 +159,8 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         return eventName.startsWith("syscall_") || //$NON-NLS-1$
                 eventName.startsWith("sched_") || //$NON-NLS-1$
                 eventName.startsWith("irq_") || //$NON-NLS-1$
-                eventName.startsWith("mm_"); //$NON-NLS-1$
-    }
-
-    /**
-     * @param trace
-     * @return
-     * @throws InterruptedException
-     */
-    public static List<ITmfEvent> getAllEvents(ITmfTrace trace) throws InterruptedException {
-        List<ITmfEvent> events = new ArrayList<>();
-        ITmfEventRequest request = new TmfEventRequest(
-            ITmfEvent.class,
-            0, // index
-            ITmfEventRequest.ALL_DATA,
-            ITmfEventRequest.ExecutionType.FOREGROUND
-        ) {
-            @Override
-            public void handleData(ITmfEvent event) {
-                events.add(event);
-            }
-        };
-        trace.sendRequest(request);
-        request.waitForCompletion();
-        return events;
+                eventName.startsWith("mm_") || //$NON-NLS-1$
+                eventName.startsWith("kvm_"); //$NON-NLS-1$  I want to also get kvm entry exit xapic etc ...
     }
 
 
@@ -181,7 +168,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
     private static List<KernelEventInfo> extractKernelEventsBetween(
             ITmfTrace trace,
             long startNanos,
-            long endNanos
+            long endNanos, TraceType source
     ) throws InterruptedException {
         List<KernelEventInfo> result = new ArrayList<>();
 
@@ -203,26 +190,60 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                     return;
                 }
                 String name = event.getType().getName();
-                if (isKernelEvent(event)) {
-                    Integer pid = getIntField(event, PID);
-                    Integer tid = getIntField(event, TID);
-                    result.add(new KernelEventInfo(
+                Integer pid = getIntField(event, PID);
+                Integer tid = getIntField(event, TID);
+                Integer cpuid = getIntField(event, CPUID);
+                Integer vcpuid = getIntField(event, VCPUID);
+                String processName = getProcessName(event);
+                result.add(new KernelEventInfo(
                         name,
                         ts,
                         pid != null ? pid : -1,
-                        tid != null ? tid : -1
+                        tid != null ? tid : -1,
+                        processName,
+                        source,
+                        cpuid != null ? cpuid : -1,
+                        vcpuid != null ? vcpuid : -1
                     ));
                 }
-            }
-        };
+            };
         trace.sendRequest(req);
         req.waitForCompletion();
         return result;
     }
 
+    private static Integer extractVcpuFromProcName(ITmfEvent event) {
+        Object commField = event.getContent().getField(PROCESS_NAME);
+        if (commField == null) {
+            return null;
+        }
+
+        String procName = commField.toString();
+
+        if (procName == null) {
+            return null;
+        }
+
+        Pattern p = Pattern.compile("CPU (\\d+)/KVM"); //$NON-NLS-1$
+        Matcher m = p.matcher(procName);
+
+        if (m.find()) {
+            return Integer.parseInt(m.group(1));
+        }
+
+        return null;
+    }
+
 
     // get the field PID/TID
     private static Integer getIntField(ITmfEvent event, String fieldName) {
+
+        if (event.getType().getName().equals("kvm_x86_entry") && fieldName.equals(VCPUID)) { //$NON-NLS-1$
+            return extractVcpuFromProcName(event);
+        }
+
+
+
         Object obj = event.getContent().getField(fieldName);
         if (obj == null) {
             return null;
@@ -241,12 +262,27 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         }
     }
 
+    // get the process name
+    private static String getProcessName(ITmfEvent event) {
+        Object commField = event.getContent().getField(PROCESS_NAME);
 
+        if (commField == null) {
+            return "unknown"; //$NON-NLS-1$
+        }
 
+        String value = commField.toString();
+        String[] words = value.split("="); //$NON-NLS-1$
+        if (words.length == 0 || words.length > 2) {
+            return "unknown"; //$NON-NLS-1$
+        }
 
-    private void handleWorkloadEvent(ITmfEvent event, TraceContext context, ITmfStateSystemBuilder ss) {
+        return words[1];
+    }
+
+    private static void handleWorkloadEvent(ITmfEvent event, TraceContext context, ITmfStateSystemBuilder ss) {
         try {
             String eventName = event.getType().getName();
+            Integer pid = getIntField(event, PID);
             long timestamp = event.getTimestamp().toNanos();
 
             String[] parts = eventName.split(":"); //$NON-NLS-1$
@@ -255,7 +291,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
             }
 
             String workloadEventType = parts[1];
-            if (workloadEventType.endsWith("_start")) { //$NON-NLS-1$
+            /*if (workloadEventType.endsWith("_start")) { //$NON-NLS-1$
                 String phase = extractPhase(workloadEventType);
                 if (context.type == TraceType.NATIVE_UST) {
                     currentNativePhase = phase;
@@ -270,7 +306,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 if (context.type == TraceType.VM_GUEST_UST) {
                     currentVmPhase = null;
                 }
-            }
+            }*/
 
 
             // Get event data
@@ -292,7 +328,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 }
             }
 
-            SyncPoint syncPoint = new SyncPoint(workloadEventType, timestamp, context.type, dataValue);
+            SyncPoint syncPoint = new SyncPoint(workloadEventType, timestamp, context.type, dataValue, pid != null ? pid : -1);
             syncPoints.add(syncPoint);
 
             String attributePath = getWorkloadAttributePath(context.type, workloadEventType);
@@ -309,43 +345,24 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         }
     }
 
-    @SuppressWarnings("null")
+
     private static void handleKernelEvent(ITmfEvent event, TraceContext context, ITmfStateSystemBuilder ss) {
         try {
                 String eventName = event.getType().getName();
-                String eventClass = null;
+                //String eventClass = null;
 
                 if (eventName.startsWith("syscall_entry_")) { //$NON-NLS-1$
-                    eventClass = "syscall"; //$NON-NLS-1$
+                    //eventClass = "syscall"; //$NON-NLS-1$
                     handleSyscallEntry(event, context, ss);
                 } else if (eventName.startsWith("syscall_exit_")) { //$NON-NLS-1$
-                    eventClass = "syscall"; //$NON-NLS-1$
+                    //eventClass = "syscall"; //$NON-NLS-1$
                     handleSyscallExit(event, context, ss);
                 } else if (eventName.startsWith("sched_switch")) { //$NON-NLS-1$
-                    eventClass = "context_switch"; //$NON-NLS-1$
+                    //eventClass = "context_switch"; //$NON-NLS-1$
                     handleSchedulerSwitch(event, context, ss);
-                } else if (eventName.startsWith("mm_page_fault")) { //$NON-NLS-1$
-                    eventClass = "page_fault"; //$NON-NLS-1$
-                }
-
-                // add to the appropriate table
-                if (eventClass != null) {
-                    if (context.type == TraceType.NATIVE_KERNEL) {
-                        nativeEventCounts.merge(eventClass, 1, Integer::sum);
-                        if (currentNativePhase != null) {
-                            nativePhaseEventCounts
-                            .computeIfAbsent(currentNativePhase, k -> new HashMap<>())
-                            .merge(eventClass, 1, Integer::sum);
-                        }
-                    } else if (context.type == TraceType.VM_GUEST_KERNEL) {
-                        vmEventCounts.merge(eventClass, 1, Integer::sum);
-                        if (currentVmPhase != null) {
-                            vmPhaseEventCounts
-                                .computeIfAbsent(currentVmPhase, k -> new HashMap<>())
-                                .merge(eventClass, 1, Integer::sum);
-                        }
-                    }
-                }
+                } /*else if (eventName.startsWith("mm_page_fault")) { //$NON-NLS-1$
+                    //eventClass = "page_fault"; //$NON-NLS-1$
+                }*/
 
         } catch (Exception e) {
             System.err.println("Error handling kernel event: " + e.getMessage()); //$NON-NLS-1$
@@ -453,7 +470,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         if (eventType.startsWith("io")) { //$NON-NLS-1$
             return "io"; //$NON-NLS-1$
         }
-        return "unknown"; //$NON-NLS-1$
+        return "workload"; //"unknown"; //$NON-NLS-1$
     }
 
     private static String getPhaseAttributePath(TraceType type, String phase) {
@@ -479,7 +496,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         }
 
         // globally
-        int eventRateRoot = ss.getQuarkAbsoluteAndAdd("EventRates"); //$NON-NLS-1$
+        /*int eventRateRoot = ss.getQuarkAbsoluteAndAdd("EventRates"); //$NON-NLS-1$
         for (String eventClass: List.of("syscall", "context_switch", "page_fault")) { //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             int natAttr = ss.getQuarkRelativeAndAdd(eventRateRoot, "native_" + eventClass); //$NON-NLS-1$
             int vmAttr = ss.getQuarkRelativeAndAdd(eventRateRoot, "vm_" + eventClass); //$NON-NLS-1$
@@ -499,7 +516,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 ss.modifyAttribute(ss.getCurrentEndTime(), natMap.getOrDefault(eventClass, 0), natAttr);
                 ss.modifyAttribute(ss.getCurrentEndTime(), vmMap.getOrDefault(eventClass, 0), vmAttr);
             }
-        }
+        }*/
     }
 
     private void correlateSyncPoints() {
@@ -570,7 +587,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
             }
 
             // === Analyse par phase (compute, memory, io) ===
-            String[] phases = {"compute", "memory", "io"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            String[] phases = {"workload", "compute", "memory", "io"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
             int phaseRoot = ss.getQuarkAbsoluteAndAdd("PhaseDurations"); //$NON-NLS-1$
             for (String phase : phases) {
                 SyncPoint nativeStart = null, nativeEnd = null;
@@ -613,85 +630,156 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                     ss.modifyAttribute(correlationTime, phaseData, attr);
                 }
 
+                // TODO add also native
 
-                // flow analysis for the native system for now
-                if (nativeStart != null && nativeEnd != null) {
-                    // extracting events kernel between nativeStart and nativeEnd
-                    ITmfTrace nativeTrace = traceContexts.values().stream()
-                            .filter(ctx -> ctx.type == TraceType.NATIVE_KERNEL)
-                            .map(ctx -> ctx.trace)
-                            .findFirst()
-                            .orElse(null);
-
-                    if (nativeTrace != null) {
-                        List<KernelEventInfo> kernelEvents = extractKernelEventsBetween(
-                                nativeTrace,
-                                nativeStart.timestamp,
-                                nativeEnd.timestamp
-                                );
-
-                        // TODO save this in your state system for later
-                        for (KernelEventInfo evt : kernelEvents) {
-                            eventsById.computeIfAbsent(evt.tid, k -> new ArrayList<>()).add(evt);
-
-                            /*System.out.println(String.format("Native Phase=%s Event: %s @ %d PID=%d TID=%d", //$NON-NLS-1$
-                                    phase, evt.name, evt.timestamp, evt.pid, evt.tid));*/
-                        }
-
-                        for (Map.Entry<Integer, List<KernelEventInfo>> entry : eventsById.entrySet()) {
-                            int tid  = entry.getKey();
-                            List<KernelEventInfo> events  = entry.getValue();
-
-                            System.out.println("\n=== TID " + tid + " ==="); //$NON-NLS-1$ //$NON-NLS-2$
-
-                            Stack<KernelEventInfo> syscallStack = new Stack<>();
-                            for (KernelEventInfo evt : events) {
-                                if (evt.name.startsWith("syscall_entry")) { //$NON-NLS-1$
-                                    syscallStack.push(evt);
-                                } else if (evt.name.startsWith("syscall_exit") && !syscallStack.isEmpty()) { //$NON-NLS-1$
-                                    KernelEventInfo entryEvt = syscallStack.pop();
-                                    long duration = evt.timestamp - entryEvt.timestamp;
-                                    System.out.printf("Syscall: %s ➜ %s (%d µs)\n", entryEvt.name, evt.name, duration); //$NON-NLS-1$
-                                } else {
-                                    System.out.printf("Event: %s @ %d\n", evt.name, evt.timestamp); //$NON-NLS-1$
-                                }
-                            }
-                        }
-                    }
-                }
-
-
-                // flow analysis for the virtualized system
                 if (vmStart != null && vmEnd != null) {
-                 // extracting events kernel between vmStart and vmEnd
-                 ITmfTrace hostTrace = traceContexts.values().stream()
-                         .filter(ctx -> ctx.type == TraceType.VM_GUEST_KERNEL)
-                         .map(ctx -> ctx.trace)
-                         .findFirst()
-                         .orElse(null);
-
-
-                 if (hostTrace != null) {
-                     /*List<KernelEventInfo> kernelEvents = extractKernelEventsBetween(
-                             hostTrace,
-                             vmStart.timestamp,
-                             vmEnd.timestamp
-                             );*/
-
-                     // TODO save this in your state system for later
-                     /*for (KernelEventInfo evt : kernelEvents) {
-                         System.out.println(String.format("VM Phase=%s Event: %s @ %d PID=%d TID=%d", //$NON-NLS-1$
-                                 phase, evt.name, evt.timestamp, evt.pid, evt.tid));
-                     }*/
-                 }
+                    analyzeCompleVirtualizationStack(phase, vmStart, vmEnd);
                 }
             }
-
         } catch (Exception e) {
             System.err.println("Error correlating sync points: " + e.getMessage()); //$NON-NLS-1$
         }
     }
 
+
+    private static void analyzeCompleVirtualizationStack(String phase,
+            SyncPoint vmStart,
+            SyncPoint vmEnd) {
+
+        if (vmStart == null || vmEnd == null) {
+            return;
+        }
+
+        try {
+            // Get guest kernel trace
+            ITmfTrace guestTrace = traceContexts.values().stream()
+                    .filter(ctx -> ctx.type == TraceType.VM_GUEST_KERNEL)
+                    .map(ctx -> ctx.trace)
+                    .findFirst().orElse(null);
+
+            // Get host kernel trace
+            ITmfTrace hostTrace = traceContexts.values().stream()
+                    .filter(ctx -> ctx.type == TraceType.VM_HOST)
+                    .map(ctx -> ctx.trace)
+                    .findFirst().orElse(null);
+
+            if (guestTrace == null || hostTrace == null) {
+                System.out.println("Missing guest or host trace for complete analysis"); //$NON-NLS-1$
+                return;
+            }
+
+            // Extract events from both traces in the same time window
+            List<KernelEventInfo> guestEvents = extractKernelEventsBetween(
+                    guestTrace, vmStart.timestamp, vmEnd.timestamp, TraceType.VM_GUEST_KERNEL);
+
+            List<KernelEventInfo> hostEvents = extractKernelEventsBetween(
+                    hostTrace, vmStart.timestamp, vmEnd.timestamp, TraceType.VM_HOST);
+
+            // get only kvm exit
+            List<KernelEventInfo> kvmExitEvents = hostEvents.stream()
+                    .filter(event -> "kvm_x86_exit".equals(event.name) || "kvm_x86_entry".equals(event.name)) //$NON-NLS-1$ //$NON-NLS-2$
+                    .collect(Collectors.toList());
+
+
+            // Group guest events by process
+            Map<String, List<KernelEventInfo>> guestProcessEvents = guestEvents.stream()
+                    .filter(e -> !"unknown".equals(e.processName)) //$NON-NLS-1$
+                    .filter(e -> e.pid == vmStart.pid)
+                    .collect(Collectors.groupingBy(e -> e.processName));
+
+            System.out.printf("\n=== UNIFIED VIRTUALIZATION FLOW: %s ===\n", phase.toUpperCase()); //$NON-NLS-1$
+
+            // Analyze each guest process with its associated hypervisor activity
+            for (Map.Entry<String, List<KernelEventInfo>> entry : guestProcessEvents.entrySet()) {
+                String processName = entry.getKey();
+                List<KernelEventInfo> processGuestEvents = entry.getValue();
+
+                // Create enhanced ProcessFlowInfo with hypervisor tracking
+                ProcessFlowInfo processFlow = new ProcessFlowInfo(phase, processName, true);
+
+                // Add guest events
+                for (KernelEventInfo guestEvent : processGuestEvents) {
+                    processFlow.addGuestEvent(guestEvent);
+                }
+
+                // Correlate hypervisor events with guest events
+                correlateHypervisorEvents(processFlow, processGuestEvents, kvmExitEvents);
+
+                // Finalize and print the unified flow
+                processFlow.finalizeFlow();
+                processFlow.printUnifiedFlow();
+            }
+
+        } catch (Exception e) {
+            System.err.println("Error in complete virtualization analysis: " + e.getMessage()); //$NON-NLS-1$
+        }
+
+    }
+
+    /**
+     * Correlate hypervisor events with guest process events
+     * Optimized: using index to avoid iterating on the entire list
+     */
+    private static void correlateHypervisorEvents(ProcessFlowInfo processFlow,
+            List<KernelEventInfo> guestEvents,
+            List<KernelEventInfo> hostEvents) {
+
+        // INDEX des host events par cpuid et par timestamp (TreeMap pour les recherches rapides)
+        Map<Integer, TreeMap<Long, List<KernelEventInfo>>> hostEventIndex = new HashMap<>();
+
+        for (KernelEventInfo hostEvent : hostEvents) {
+            int cpuid = hostEvent.vcpuid;
+            hostEventIndex
+                .computeIfAbsent(cpuid, k -> new TreeMap<>())
+                .computeIfAbsent(hostEvent.timestamp, t -> new ArrayList<>())
+                .add(hostEvent);
+        }
+
+        // Fenêtre de corrélation temporelle en nanosecondes (par exemple 1ms = 1_000_000 ns)
+       final long correlationWindow = 1_000_000;
+
+       for (KernelEventInfo guestEvent : guestEvents) {
+           int guestCpuid = guestEvent.cpuid;
+           long guestTime = guestEvent.timestamp;
+
+           TreeMap<Long, List<KernelEventInfo>> hostEventsForCpu = hostEventIndex.get(guestCpuid);
+           if (hostEventsForCpu == null) {
+               continue;
+           }
+
+        // Recherche dans la fenêtre temporelle autour de guestTime
+           SortedMap<Long, List<KernelEventInfo>> subMap =
+               hostEventsForCpu.subMap(guestTime - correlationWindow, true, guestTime + correlationWindow, true);
+
+           for (List<KernelEventInfo> eventsAtTimestamp : subMap.values()) {
+               for (KernelEventInfo hostEvent : eventsAtTimestamp) {
+                   if (isVMExit(hostEvent)) {
+                       processFlow.addVMTransition(hostEvent, true); // VM Exit
+                   } else if (isVMEntry(hostEvent)) {
+                       processFlow.addVMTransition(hostEvent, false); // VM Entry
+                   } else {
+                       processFlow.addHypervisorEvent(hostEvent, guestEvent.timestamp);
+                   }
+               }
+           }
+       }
+    }
+
+    /**
+     * Check if an event is a VM exit
+     */
+    private static boolean isVMExit(KernelEventInfo event) {
+        return event.name.contains("kvm_x86_exit"); //$NON-NLS-1$
+
+    }
+
+    /**
+     * Check if an event is a VM entry
+     */
+    private static boolean isVMEntry(KernelEventInfo event) {
+        return event.name.contains("kvm_x86_entry"); //$NON-NLS-1$
+
+    }
 
     /**
      * Context information for each trace
@@ -714,48 +802,15 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         final long timestamp;
         final TraceType traceType;
         final Integer dataValue;
+        final int pid;
 
-        SyncPoint(String eventType, long timestamp, TraceType traceType, Integer dataValue) {
+        SyncPoint(String eventType, long timestamp, TraceType traceType, Integer dataValue, int pid) {
             this.eventType = eventType;
             this.timestamp = timestamp;
             this.traceType = traceType;
             this.dataValue = dataValue;
+            this.pid = pid;
         }
     }
 
-    /**
-    *
-    */
-   public static class KernelEventInfo {
-       public final String name;
-       public final long timestamp;
-       public final int pid;
-       public final int tid;
-
-       /**
-        * @param name
-        * @param timestamp
-        * @param pid
-        * @param tid
-        */
-       public KernelEventInfo(String name, long timestamp, int pid, int tid) {
-           this.name = name;
-           this.timestamp = timestamp;
-           this.pid = pid;
-           this.tid = tid;
-       }
-   }
-
-
-    /*
-     * Types of traces in the experiment
-     */
-    private enum TraceType{
-        NATIVE_KERNEL,
-        NATIVE_UST,
-        VM_GUEST_KERNEL,
-        VM_GUEST_UST,
-        VM_HOST,
-        UNKNOWN
-    }
 }
