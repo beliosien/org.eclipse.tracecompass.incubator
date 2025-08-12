@@ -675,12 +675,6 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
             List<KernelEventInfo> hostEvents = extractKernelEventsBetween(
                     hostTrace, vmStart.timestamp, vmEnd.timestamp, TraceType.VM_HOST);
 
-            // get only kvm exit
-            List<KernelEventInfo> kvmExitEvents = hostEvents.stream()
-                    .filter(event -> "kvm_x86_exit".equals(event.name) || "kvm_x86_entry".equals(event.name)) //$NON-NLS-1$ //$NON-NLS-2$
-                    .collect(Collectors.toList());
-
-
             // Group guest events by process
             Map<String, List<KernelEventInfo>> guestProcessEvents = guestEvents.stream()
                     .filter(e -> !"unknown".equals(e.processName)) //$NON-NLS-1$
@@ -697,13 +691,8 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 // Create enhanced ProcessFlowInfo with hypervisor tracking
                 ProcessFlowInfo processFlow = new ProcessFlowInfo(phase, processName, true);
 
-                // Add guest events
-                for (KernelEventInfo guestEvent : processGuestEvents) {
-                    processFlow.addGuestEvent(guestEvent);
-                }
-
                 // Correlate hypervisor events with guest events
-                correlateHypervisorEvents(processFlow, processGuestEvents, kvmExitEvents);
+                correlateHypervisorEvents(processFlow, processGuestEvents, hostEvents);
 
                 // Finalize and print the unified flow
                 processFlow.finalizeFlow();
@@ -724,45 +713,56 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
             List<KernelEventInfo> guestEvents,
             List<KernelEventInfo> hostEvents) {
 
-        // INDEX des host events par cpuid et par timestamp (TreeMap pour les recherches rapides)
-        Map<Integer, TreeMap<Long, List<KernelEventInfo>>> hostEventIndex = new HashMap<>();
+        // Step 1: Extract and sort VM transitions separately for efficiency
+        List<KernelEventInfo> vmTransitions = hostEvents.stream()
+                .filter(e -> isVMExit(e) || isVMEntry(e))
+                .sorted(Comparator.comparing(e -> e.timestamp))
+                .collect(Collectors.toList());
 
-        for (KernelEventInfo hostEvent : hostEvents) {
-            int cpuid = hostEvent.vcpuid;
-            hostEventIndex
-                .computeIfAbsent(cpuid, k -> new TreeMap<>())
-                .computeIfAbsent(hostEvent.timestamp, t -> new ArrayList<>())
-                .add(hostEvent);
+        // Step 2: Build vCPU exit/entry pairs
+        Map<Integer, List<VMTransitionPair>> transitionPairs = buildTransitionPairs(vmTransitions);
+
+        // Step 3: Index remaining host events by CPU and time (excluding VM transitions)
+        Map<Integer, List<KernelEventInfo>> hostEventsByCpu = hostEvents.stream()
+                .filter(e -> !isVMExit(e) && !isVMEntry(e))
+                .collect(Collectors.groupingBy(e -> e.cpuid));
+
+        // Step 4: Process guest events and find their corresponding VM transitions
+        final long correlationWindow = 1_000_000; // 1ms
+
+        for (KernelEventInfo guestEvent : guestEvents) {
+            int guestCpuid = guestEvent.cpuid;
+            long guestTime = guestEvent.timestamp;
+
+            // Add the guest event first
+            processFlow.addGuestEvent(guestEvent);
+
+            // Find the VM transition pair that this guest event belongs to
+            List<VMTransitionPair> pairs = transitionPairs.get(guestCpuid);
+            if (pairs == null) {
+                continue;
+            }
+
+            VMTransitionPair relevantPair = findRelevantTransitionPair(pairs, guestTime, correlationWindow);
+            if (relevantPair != null) {
+                // Add VM exit
+                processFlow.addVMTransition(relevantPair.exit, true);
+
+                // Add all host overhead events between exit and entry
+                List<KernelEventInfo> cpuHostEvents = hostEventsByCpu.get(guestCpuid);
+                if (cpuHostEvents != null) {
+                    for (KernelEventInfo hostEvent : cpuHostEvents) {
+                        if (hostEvent.timestamp > relevantPair.exit.timestamp &&
+                            hostEvent.timestamp < relevantPair.entry.timestamp) {
+                            processFlow.addHypervisorEvent(hostEvent, relevantPair.exit.timestamp);
+                        }
+                    }
+                }
+
+                // Add VM entry
+                processFlow.addVMTransition(relevantPair.entry, false);
+            }
         }
-
-        // Fenêtre de corrélation temporelle en nanosecondes (par exemple 1ms = 1_000_000 ns)
-       final long correlationWindow = 1_000_000;
-
-       for (KernelEventInfo guestEvent : guestEvents) {
-           int guestCpuid = guestEvent.cpuid;
-           long guestTime = guestEvent.timestamp;
-
-           TreeMap<Long, List<KernelEventInfo>> hostEventsForCpu = hostEventIndex.get(guestCpuid);
-           if (hostEventsForCpu == null) {
-               continue;
-           }
-
-        // Recherche dans la fenêtre temporelle autour de guestTime
-           SortedMap<Long, List<KernelEventInfo>> subMap =
-               hostEventsForCpu.subMap(guestTime - correlationWindow, true, guestTime + correlationWindow, true);
-
-           for (List<KernelEventInfo> eventsAtTimestamp : subMap.values()) {
-               for (KernelEventInfo hostEvent : eventsAtTimestamp) {
-                   if (isVMExit(hostEvent)) {
-                       processFlow.addVMTransition(hostEvent, true); // VM Exit
-                   } else if (isVMEntry(hostEvent)) {
-                       processFlow.addVMTransition(hostEvent, false); // VM Entry
-                   } else {
-                       processFlow.addHypervisorEvent(hostEvent, guestEvent.timestamp);
-                   }
-               }
-           }
-       }
     }
 
     /**
@@ -811,6 +811,52 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
             this.dataValue = dataValue;
             this.pid = pid;
         }
+    }
+
+
+    // Helper class for VM transition pairs
+    private static class VMTransitionPair {
+        final KernelEventInfo exit;
+        final KernelEventInfo entry;
+
+        VMTransitionPair(KernelEventInfo exit, KernelEventInfo entry) {
+            this.exit = exit;
+            this.entry = entry;
+        }
+    }
+
+    // Build exit/entry pairs per vCPU
+    private static Map<Integer, List<VMTransitionPair>> buildTransitionPairs(List<KernelEventInfo> vmTransitions) {
+        Map<Integer, List<VMTransitionPair>> pairs = new HashMap<>();
+        Map<Integer, KernelEventInfo> pendingExits = new HashMap<>();
+
+        for (KernelEventInfo event : vmTransitions) {
+            int vcpu = event.vcpuid;
+
+            if (isVMExit(event)) {
+                pendingExits.put(vcpu, event);
+            } else if (isVMEntry(event)) {
+                KernelEventInfo exit = pendingExits.remove(vcpu);
+                if (exit != null) {
+                    pairs.computeIfAbsent(vcpu, k -> new ArrayList<>())
+                         .add(new VMTransitionPair(exit, event));
+                }
+            }
+        }
+        return pairs;
+    }
+
+    // Find the transition pair that contains or is closest to the guest event
+    private static VMTransitionPair findRelevantTransitionPair(List<VMTransitionPair> pairs,
+            long guestTime, long window) {
+
+        for (VMTransitionPair pair : pairs) {
+            // Check if guest event is near the exit (likely caused the exit)
+            if (Math.abs(guestTime - pair.exit.timestamp) <= window) {
+                return pair;
+            }
+        }
+        return null;
     }
 
 }

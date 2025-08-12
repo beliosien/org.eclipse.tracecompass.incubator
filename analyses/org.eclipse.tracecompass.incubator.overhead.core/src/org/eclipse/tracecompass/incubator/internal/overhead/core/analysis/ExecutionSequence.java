@@ -2,6 +2,10 @@ package org.eclipse.tracecompass.incubator.internal.overhead.core.analysis;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.PrintWriter;
 
 /**
  * Represents a complete execution sequence: Guest → VM Exit → Host → VM Entry
@@ -30,34 +34,51 @@ public class ExecutionSequence {
         this.vmEntry = event;
     }
 
-    void printSequence() {
-        // Print guest events leading to VM exit
-        for (FlowEvent guestEvent : guestEvents) {
-            KernelEventInfo evt = guestEvent.kernelEvent;
-            System.out.printf("    [GUEST] %s (TID:%d)\n", evt.name, evt.tid); //$NON-NLS-1$
-        }
+    void printSequence() throws IOException {
+        try (
 
-        // Print VM exit
-        if (vmExit != null) {
-            System.out.printf("    ↓ [VM_EXIT] %s\n", vmExit.kernelEvent.name); //$NON-NLS-1$
-        }
+            FileOutputStream fos = new FileOutputStream(new File("/home/philippe/Desktop/virtualized_flow.txt"), true); //$NON-NLS-1$
+            PrintWriter writer = new PrintWriter(fos)) {
+            for (FlowEvent guestEvent : guestEvents) {
+                KernelEventInfo evt = guestEvent.kernelEvent;
+                System.out.printf("    [GUEST] %s (TID:%d, CPU:%d)\n", evt.name, evt.tid, evt.cpuid); //$NON-NLS-1$
+                writer.printf("    [GUEST] %s (TID:%d, CPU:%d)\n", evt.name, evt.tid, evt.cpuid); //$NON-NLS-1$
+            }
 
-        // Print hypervisor events
-        for (FlowEvent hypervisorEvent : hypervisorEvents) {
-            KernelEventInfo evt = hypervisorEvent.kernelEvent;
-            System.out.printf("      [HOST] %s (PID:%d)\n", evt.name, evt.pid); //$NON-NLS-1$
-        }
+            // Print VM exit
+            if (vmExit != null) {
+                System.out.printf("    ↓ [VM_EXIT] %s (CPU:%d, VCPU:%d)\n", vmExit.kernelEvent.name,  //$NON-NLS-1$
+                        vmExit.kernelEvent.cpuid, vmExit.kernelEvent.vcpuid);
 
-        // Print VM entry
-        if (vmEntry != null) {
-            System.out.printf("    ↑ [VM_ENTRY] %s\n", vmEntry.kernelEvent.name); //$NON-NLS-1$
-        }
+                writer.printf("    ↓ [VM_EXIT] %s (CPU:%d, VCPU:%d)\n", vmExit.kernelEvent.name,  //$NON-NLS-1$
+                        vmExit.kernelEvent.cpuid, vmExit.kernelEvent.vcpuid);
+            }
 
-        // Print timing summary
-        if (!guestEvents.isEmpty() && vmEntry != null) {
-            long totalDuration = vmEntry.kernelEvent.timestamp -
-                guestEvents.get(0).kernelEvent.timestamp;
-            System.out.printf("    Total sequence duration: %d µs\n", totalDuration / 1000); //$NON-NLS-1$
+            // Print hypervisor events
+            for (FlowEvent hypervisorEvent : hypervisorEvents) {
+                KernelEventInfo evt = hypervisorEvent.kernelEvent;
+                System.out.printf("      [HOST] %s (PID:%d, CPU:%d)\n", evt.name, evt.pid, evt.cpuid); //$NON-NLS-1$
+
+                writer.printf("      [HOST] %s (PID:%d, CPU:%d)\n", evt.name, evt.pid, evt.cpuid); //$NON-NLS-1$
+            }
+
+            // Print VM entry
+            if (vmEntry != null) {
+                System.out.printf("    ↑ [VM_ENTRY] %s (CPU:%d, VCPU:%d)\n", vmEntry.kernelEvent.name, //$NON-NLS-1$
+                        vmEntry.kernelEvent.cpuid, vmEntry.kernelEvent.vcpuid);
+
+                writer.printf("    ↑ [VM_ENTRY] %s (CPU:%d, VCPU:%d)\n", vmEntry.kernelEvent.name, //$NON-NLS-1$
+                        vmEntry.kernelEvent.cpuid, vmEntry.kernelEvent.vcpuid);
+            }
+
+            // Print timing summary
+            if (!guestEvents.isEmpty() && vmEntry != null) {
+                long totalDuration = vmEntry.kernelEvent.timestamp -
+                    guestEvents.get(0).kernelEvent.timestamp;
+                System.out.printf("    Total sequence duration: %d µs\n", totalDuration / 1000); //$NON-NLS-1$
+
+                writer.printf("    Total sequence duration: %d µs\n", totalDuration / 1000); //$NON-NLS-1$
+            }
         }
     }
 

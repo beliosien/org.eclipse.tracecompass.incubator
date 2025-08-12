@@ -1,5 +1,9 @@
 package org.eclipse.tracecompass.incubator.internal.overhead.core.analysis;
 
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -72,6 +76,16 @@ public class ProcessFlowInfo {
         if (!trackHypervisor) {
             return;
         }
+
+        String key = "HYPERVISOR" + "_" +  //$NON-NLS-1$ //$NON-NLS-2$
+                hypervisorEvt.timestamp + "_" + hypervisorEvt.cpuid + "_"  //$NON-NLS-1$ //$NON-NLS-2$
+                    + "_" + hypervisorEvt.tid; //$NON-NLS-1$
+
+        // To avoid duplicate events but i think i can do better
+        if (seenTransitions.contains(key)) {
+            return;
+        }
+        seenTransitions.add(key);
 
         FlowEvent flowEvent = new FlowEvent(hypervisorEvt, FlowEventType.HYPERVISOR_EVENT);
         flowEvent.correlatedGuestTimestamp = guestEventTimestamp;
@@ -165,8 +179,9 @@ public class ProcessFlowInfo {
 
     /**
      * Print the unified execution flow
+     * @throws IOException
      */
-    void printUnifiedFlow() {
+    void printUnifiedFlow() throws IOException {
         System.out.printf("\n=== Unified Flow for Process %s (Phase: %s) ===\n",  //$NON-NLS-1$
             processName, phase);
 
@@ -178,17 +193,23 @@ public class ProcessFlowInfo {
         printVirtualizedFlow();
     }
 
-    private void printSimpleFlow() {
+    private void printSimpleFlow() throws IOException {
         System.out.printf("Events: %d, Threads: %d\n", unifiedFlow.size(), threadsByTid.size()); //$NON-NLS-1$
 
-        for (FlowEvent flowEvent : unifiedFlow) {
-            KernelEventInfo evt = flowEvent.kernelEvent;
-            System.out.printf("  [%d] %s (TID:%d)\n",  //$NON-NLS-1$
-                evt.timestamp, evt.name, evt.tid);
+        FileOutputStream fos = new FileOutputStream(new File("/home/philippe/Desktop/natif_flow.txt"), true); //$NON-NLS-1$
+        try (PrintWriter writer = new PrintWriter(fos)) {
+            for (FlowEvent flowEvent : unifiedFlow) {
+                KernelEventInfo evt = flowEvent.kernelEvent;
+                System.out.printf("  [%d] %s (TID:%d)\n",  //$NON-NLS-1$
+                    evt.timestamp, evt.name, evt.tid);
+
+                writer.printf("  [%d] %s (TID:%d)\n",  //$NON-NLS-1$
+                        evt.timestamp, evt.name, evt.tid);
+            }
         }
     }
 
-    private void printVirtualizedFlow() {
+    private void printVirtualizedFlow() throws IOException {
         System.out.printf("Execution Sequences: %d\n", executionSequences.size()); //$NON-NLS-1$
 
         int sequenceNum = 1;
@@ -198,13 +219,13 @@ public class ProcessFlowInfo {
         }
 
         // Also print raw chronological flow
-        System.out.println("\n--- Raw Chronological Flow ---"); //$NON-NLS-1$
+        /*System.out.println("\n--- Raw Chronological Flow ---"); //$NON-NLS-1$
         for (FlowEvent flowEvent : unifiedFlow) {
             printFlowEvent(flowEvent);
-        }
+        }*/
     }
 
-    private static void printFlowEvent(FlowEvent flowEvent) {
+    /*private static void printFlowEvent(FlowEvent flowEvent) {
         KernelEventInfo evt = flowEvent.kernelEvent;
         String prefix = getEventPrefix(flowEvent.type);
 
@@ -222,9 +243,9 @@ public class ProcessFlowInfo {
         }
 
         System.out.println();
-    }
+    }*/
 
-    private static String getEventPrefix(FlowEventType type) {
+    /*private static String getEventPrefix(FlowEventType type) {
         switch (type) {
             case GUEST_EVENT: return "[GUEST] "; //$NON-NLS-1$
             case VM_EXIT: return "[VM_EXIT] "; //$NON-NLS-1$
@@ -232,7 +253,7 @@ public class ProcessFlowInfo {
             case VM_ENTRY: return "[VM_ENTRY] "; //$NON-NLS-1$
             default: return ""; //$NON-NLS-1$
         }
-    }
+    }*/
 
     boolean isMultiThreaded() {
         return threadsByTid.size() > 1;
