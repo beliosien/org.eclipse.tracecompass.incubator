@@ -22,5 +22,6 @@ enum FlowEventType {
     GUEST_EVENT,     // Normal guest process event
     VM_EXIT,         // VM exit to hypervisor
     HYPERVISOR_EVENT, // Host/hypervisor processing
-    VM_ENTRY         // VM entry back to guest
+    VM_ENTRY,         // VM entry back to guest
+    NATIVE // Native system
 }

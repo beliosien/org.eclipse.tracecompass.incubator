@@ -630,7 +630,9 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                     ss.modifyAttribute(correlationTime, phaseData, attr);
                 }
 
-                // TODO add also native
+                if (nativeStart != null && nativeEnd != null) {
+                    analyzeNatifStack(phase, nativeStart, nativeEnd);
+                }
 
                 if (vmStart != null && vmEnd != null) {
                     analyzeCompleVirtualizationStack(phase, vmStart, vmEnd);
@@ -638,6 +640,62 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
             }
         } catch (Exception e) {
             System.err.println("Error correlating sync points: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    private static void analyzeNatifStack(String phase, SyncPoint nativeStart,
+            SyncPoint nativeEnd) {
+
+        if (nativeStart == null || nativeEnd == null) {
+            return;
+        }
+
+        try {
+            // Get the natif trace
+            ITmfTrace nativeTrace = traceContexts.values().stream()
+                    .filter(ctx -> ctx.type == TraceType.NATIVE_KERNEL)
+                    .map(ctx -> ctx.trace)
+                    .findFirst().orElse(null);
+
+            if (nativeTrace == null) {
+                System.out.println("Missing native trace for the analysis"); //$NON-NLS-1$
+                return;
+            }
+
+            List<KernelEventInfo> nativeEvents = extractKernelEventsBetween(
+                    nativeTrace, nativeStart.timestamp, nativeEnd.timestamp, TraceType.NATIVE_KERNEL);
+
+
+            // Group guest events by process
+            Map<String, List<KernelEventInfo>> nativeProcessEvents = nativeEvents.stream()
+                    .filter(e -> !"unknown".equals(e.processName)) //$NON-NLS-1$
+                    .filter(e -> e.pid == nativeStart.pid)
+                    .collect(Collectors.groupingBy(e -> e.processName));
+
+
+            System.out.printf("\n=== UNIFIED Natif FLOW: %s ===\n", phase.toUpperCase()); //$NON-NLS-1$
+
+            // Analyze each process
+            for (Map.Entry<String, List<KernelEventInfo>> entry : nativeProcessEvents.entrySet()) {
+                String processName = entry.getKey();
+                List<KernelEventInfo> processNativeEvents = entry.getValue();
+
+                // Create the process flow for the native system
+                ProcessFlowInfo processFlow = new ProcessFlowInfo(phase, processName, false); // here we don't want to track the hypervisor
+
+                for (KernelEventInfo event : processNativeEvents) {
+                    processFlow.addEvent(event);
+                }
+
+                // Finalize and print the unified flow
+                processFlow.finalizeFlow();
+                processFlow.printUnifiedFlow();
+            }
+
+
+
+        } catch (Exception e) {
+            System.err.println("Error in complet native analysis: " + e.getMessage()); //$NON-NLS-1$
         }
     }
 

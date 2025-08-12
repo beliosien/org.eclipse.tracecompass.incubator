@@ -70,6 +70,29 @@ public class ProcessFlowInfo {
     }
 
     /**
+     * Use this function when you want to add native events
+     * @param evt: event you want to add
+     */
+    public void addEvent(KernelEventInfo evt) {
+        if (trackHypervisor) {
+            return;  // we don't want to track the hypervisor because we are on the native system
+        }
+
+        String key = "NATIVE" + "_" +  //$NON-NLS-1$ //$NON-NLS-2$
+                evt.timestamp + "_" + evt.cpuid + "_"  //$NON-NLS-1$ //$NON-NLS-2$
+                    + "_" + evt.tid; //$NON-NLS-1$
+
+        // To avoid duplicate events but i think i can do better
+        if (seenTransitions.contains(key)) {
+            return;
+        }
+        seenTransitions.add(key);
+
+        FlowEvent flowEvent = new FlowEvent(evt, FlowEventType.NATIVE);
+        unifiedFlow.add(flowEvent);
+    }
+
+    /**
      * Add a hypervisor event correlated with this process
      */
     void addHypervisorEvent(KernelEventInfo hypervisorEvt, long guestEventTimestamp) {
@@ -164,6 +187,13 @@ public class ProcessFlowInfo {
                         currentSequence = null; // Start new sequence
                     }
                     break;
+            case NATIVE:
+                if (currentSequence == null) {
+                    currentSequence = new ExecutionSequence();
+                }
+                currentSequence.addHypervisorEvent(flowEvent);
+                break;
+
             default:
                 break;
             }
