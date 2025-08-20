@@ -47,11 +47,11 @@ public class ExecutionSequence {
 
             // Print VM exit
             if (vmExit != null) {
-                System.out.printf("    ↓ [VM_EXIT] %s (CPU:%d, VCPU:%d)\n", vmExit.kernelEvent.name,  //$NON-NLS-1$
-                        vmExit.kernelEvent.cpuid, vmExit.kernelEvent.vcpuid);
+                System.out.printf("    ↓ [VM_EXIT] %s (CPU:%d, VCPU:%d, exit_reason:%s)\n", vmExit.kernelEvent.name,  //$NON-NLS-1$
+                        vmExit.kernelEvent.cpuid, vmExit.kernelEvent.vcpuid, vmExit.kernelEvent.exitReason);
 
-                writer.printf("    ↓ [VM_EXIT] %s (CPU:%d, VCPU:%d)\n", vmExit.kernelEvent.name,  //$NON-NLS-1$
-                        vmExit.kernelEvent.cpuid, vmExit.kernelEvent.vcpuid);
+                writer.printf("    ↓ [VM_EXIT] %s (CPU:%d, VCPU:%d, exit_reason:%s)\n", vmExit.kernelEvent.name,  //$NON-NLS-1$
+                        vmExit.kernelEvent.cpuid, vmExit.kernelEvent.vcpuid, vmExit.kernelEvent.exitReason);
             }
 
             // Print hypervisor events

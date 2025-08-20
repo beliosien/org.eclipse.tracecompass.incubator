@@ -10,6 +10,7 @@ public class KernelEventInfo {
     public final TraceType source;
     public final int cpuid;
     public final int vcpuid;
+    public final String exitReason;
 
     /**
      * @param name
@@ -17,9 +18,13 @@ public class KernelEventInfo {
      * @param pid
      * @param tid
      * @param processName
+     * @param source
+     * @param cpuid
+     * @param vcpuid
+     * @param exitReason
      */
     public KernelEventInfo(String name, long timestamp, int pid, int tid, String processName,
-            TraceType source, int cpuid, int vcpuid) {
+            TraceType source, int cpuid, int vcpuid, String exitReason) {
         this.name = name;
         this.timestamp = timestamp;
         this.pid = pid;
@@ -28,5 +33,7 @@ public class KernelEventInfo {
         this.source = source;
         this.cpuid = cpuid;
         this.vcpuid = vcpuid;
+        this.exitReason = exitReason;
+
     }
 }
