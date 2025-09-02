@@ -12,6 +12,8 @@
 package org.eclipse.tracecompass.incubator.internal.overhead.core;
 
 import org.eclipse.tracecompass.common.core.TraceCompassActivator;
+import org.eclipse.tracecompass.incubator.internal.overhead.core.analysis.VmSyncLttngEventMatching;
+import org.eclipse.tracecompass.tmf.core.event.matching.TmfEventMatching;
 
 /**
  * Activator
@@ -39,6 +41,7 @@ public class Activator extends TraceCompassActivator {
 
     @Override
     protected void startActions() {
+        TmfEventMatching.registerMatchObject(new VmSyncLttngEventMatching());
     }
 
     @Override

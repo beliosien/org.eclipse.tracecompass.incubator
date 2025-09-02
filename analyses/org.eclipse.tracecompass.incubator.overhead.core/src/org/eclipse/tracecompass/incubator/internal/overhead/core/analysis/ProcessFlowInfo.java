@@ -215,6 +215,10 @@ public class ProcessFlowInfo {
         return targetThreadId;
     }
 
+    void SetTargetVcpuId(int value) {
+        targetVcpuId = value;
+    }
+
     /**
      * @return if we are currently inside the host
      */

@@ -51,6 +51,9 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
     private static final String CPUID = "context.cpu_id"; //$NON-NLS-1$
     private static final String VCPUID = "vcpu_id"; //$NON-NLS-1$
     private static final String EXIT_REASON = "exit_reason";  //$NON-NLS-1$
+    private static final String MARKER = "./VM_ANALYSIS.txt"; //$NON-NLS-1$
+    private static final String EVENT_MARKER = "syscall_entry_openat"; //$NON-NLS-1$
+    private boolean begin = true;
 
     /**
      * Constructor
@@ -132,8 +135,29 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
 
     private static boolean isWorkloadEvent(ITmfEvent event) {
         String eventName = event.getType().getName();
+
+        if (eventName.equals(EVENT_MARKER)) {
+            Object filenameField = event.getContent().getField("filename"); //$NON-NLS-1$
+            if (filenameField == null) {
+                return false;
+            }
+
+            String value = filenameField.toString();
+            String[] words = value.split("="); //$NON-NLS-1$
+            if (words.length == 0 || words.length > 2) {
+                return false;
+            }
+
+            if (words[1].contains(MARKER)) {
+                return true;
+            }
+
+            return false;
+        }
+
         return eventName.startsWith(WORKLOAD_UST_PROVIDER + ":"); //$NON-NLS-1$
     }
+
 
     private static boolean isKernelEvent(ITmfEvent event) {
         String eventName = event.getType().getName();
@@ -279,12 +303,29 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         return words[1];
     }
 
-    private static void handleWorkloadEvent(ITmfEvent event, TraceContext context, ITmfStateSystemBuilder ss) {
+    private void handleWorkloadEvent(ITmfEvent event, TraceContext context, ITmfStateSystemBuilder ss) {
         try {
             String eventName = event.getType().getName();
             Integer pid = getIntField(event, PID);
             String procName = getProcessName(event);
             long timestamp = event.getTimestamp().toNanos();
+
+            if (eventName.equals(EVENT_MARKER)) {
+                if (this.begin) {
+                    SyncPoint syncPoint = new SyncPoint("workload_start", timestamp, //$NON-NLS-1$
+                            context.type, 0,
+                            pid != null ? pid : -1, procName);
+                    syncPoints.add(syncPoint);
+                    this.begin = false;
+
+                } else {
+                    SyncPoint syncPoint = new SyncPoint("workload_end", timestamp, //$NON-NLS-1$
+                            context.type, 0,
+                            pid != null ? pid : -1, procName);
+                    syncPoints.add(syncPoint);
+                }
+                return;
+            }
 
             String[] parts = eventName.split(":"); //$NON-NLS-1$
             if (parts.length != 2) {
@@ -537,7 +578,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         }
 
         // 1. Récupère les timestamps de workload_start natif et VM
-        Long nativeWorkloadStart = null;
+        /*Long nativeWorkloadStart = null;
         Long vmWorkloadStart = null;
         for (SyncPoint point : syncPoints) {
             if ("workload_start".equals(point.eventType)) { //$NON-NLS-1$
@@ -551,13 +592,13 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         if (nativeWorkloadStart == null || vmWorkloadStart == null) {
             System.err.println("workload_start missing for native or VM."); //$NON-NLS-1$
             return;
-        }
+        }*/
 
         try {
             // Crée la racine "SyncPoints"
-            int syncPointsRoot = ss.getQuarkAbsoluteAndAdd(SYNC_POINTS);
+            // int syncPointsRoot = ss.getQuarkAbsoluteAndAdd(SYNC_POINTS);
 
-            for (Map.Entry<String, List<SyncPoint>> entry : syncPointGroups.entrySet()) {
+            /*for (Map.Entry<String, List<SyncPoint>> entry : syncPointGroups.entrySet()) {
                 List<SyncPoint> points = entry.getValue();
 
                 SyncPoint nativePoint = null;
@@ -587,7 +628,7 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                     long correlationTime = Math.max(nativePoint.timestamp, vmPoint.timestamp);
                     ss.modifyAttribute(correlationTime, correlationData, attribute);
                 }
-            }
+            }*/
 
             // === Analyse par phase (compute, memory, io) ===
             String[] phases = {"workload", "compute", "memory", "io"}; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
@@ -598,18 +639,18 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
 
                 for (SyncPoint point : syncPoints) {
                     if ((phase + "_start").equals(point.eventType)) { //$NON-NLS-1$
-                        if (point.traceType == TraceType.NATIVE_UST) {
+                        if (point.traceType == TraceType.NATIVE_KERNEL) {
                             nativeStart = point;
                         }
-                        if (point.traceType == TraceType.VM_GUEST_UST) {
+                        if (point.traceType == TraceType.VM_GUEST_KERNEL) {
                             vmStart = point;
                         }
                     }
                     if ((phase + "_end").equals(point.eventType)) { //$NON-NLS-1$
-                        if (point.traceType == TraceType.NATIVE_UST) {
+                        if (point.traceType == TraceType.NATIVE_KERNEL) {
                             nativeEnd = point;
                         }
-                        if (point.traceType == TraceType.VM_GUEST_UST) {
+                        if (point.traceType == TraceType.VM_GUEST_KERNEL) {
                             vmEnd = point;
                         }
                     }
@@ -777,64 +818,6 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
      * Correlate hypervisor events with guest process events
      * Optimized: using index to avoid iterating on the entire list
      */
-    /*private static void correlateHypervisorEvents(ProcessFlowInfo processFlow,
-            List<KernelEventInfo> guestEvents,
-            List<KernelEventInfo> hostEvents) {
-
-        // Step 1: Extract and sort VM transitions separately for efficiency
-        List<KernelEventInfo> vmTransitions = hostEvents.stream()
-                .filter(e -> isVMExit(e) || isVMEntry(e))
-                .sorted(Comparator.comparing(e -> e.timestamp))
-                .collect(Collectors.toList());
-
-        // Step 2: Build vCPU exit/entry pairs
-        Map<Integer, List<VMTransitionPair>> transitionPairs = buildTransitionPairs(vmTransitions);
-
-        // Step 3: Index remaining host events by CPU and time (excluding VM transitions)
-        Map<Integer, List<KernelEventInfo>> hostEventsByCpu = hostEvents.stream()
-                .filter(e -> !isVMExit(e) && !isVMEntry(e))
-                .collect(Collectors.groupingBy(e -> e.cpuid));
-
-        // Step 4: Process guest events and find their corresponding VM transitions
-        //final long correlationWindow = 1_000_000; // 1ms
-
-        for (KernelEventInfo guestEvent : guestEvents) {
-            int guestCpuid = guestEvent.cpuid;
-            long guestTime = guestEvent.timestamp;
-
-            // Add the guest event first
-            processFlow.addGuestEvent(guestEvent);
-
-            // Find the VM transition pair that this guest event belongs to
-            List<VMTransitionPair> pairs = transitionPairs.get(guestCpuid);
-            if (pairs == null) {
-                continue;
-            }
-
-            VMTransitionPair relevantPair = findRelevantTransitionPair(pairs, guestTime);
-            if (relevantPair != null) {
-                // Add VM exit
-                processFlow.addVMTransition(relevantPair.exit, true);
-                int hostcpuid = relevantPair.exit.cpuid;
-
-                // Add all host overhead events between exit and entry
-                List<KernelEventInfo> cpuHostEvents = hostEventsByCpu.get(hostcpuid);
-                if (cpuHostEvents != null) {
-                    for (KernelEventInfo hostEvent : cpuHostEvents) {
-                        if (hostEvent.timestamp > relevantPair.exit.timestamp &&
-                            hostEvent.timestamp < relevantPair.entry.timestamp) {
-                            processFlow.addHypervisorEvent(hostEvent, relevantPair.exit.timestamp);
-                        }
-                    }
-                }
-
-                // Add VM entry
-                processFlow.addVMTransition(relevantPair.entry, false);
-            }
-        }
-    }
-    */
-
     // TODO find a more efficient way
     private static void correlateHypervisorEvents(ProcessFlowInfo processFlow,
             List<KernelEventInfo> guestEvents,
@@ -852,6 +835,8 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
         }
 
         // Step 3: Get the target vCPU ID after establishing the mapping
+        //processFlow.SetTargetVcpuId(relevantGuestEvents.get(0).cpuid);
+
         Integer targetVcpuId = processFlow.getTargetVcpuId();
         if (targetVcpuId == null) {
             System.err.println("Warning: Could not establish vCPU mapping for thread " + //$NON-NLS-1$
@@ -865,65 +850,59 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                 .sorted(Comparator.comparing(e -> e.timestamp))
                 .collect(Collectors.toList());
 
-        // Step 5: Filter other host events (only those that can be correlated)
+         // Step 5: Build VM execution periods to understand when our vCPU is running
+         // List<VMExecutionPeriod> vmPeriods = buildVMExecutionPeriods(relevantVmTransitions);
+
+        // Step 6: Filter host events that could be related to our vCPU
         List<KernelEventInfo> otherHostEvents = hostEvents.stream()
                 .filter(e -> !isVMExit(e) && !isVMEntry(e))
                 .sorted(Comparator.comparing(e -> e.timestamp))
                 .collect(Collectors.toList());
 
-        // Step 6: Create unified timeline with all relevant events
+        // Step 7: Create unified timeline
         List<TimedEvent> timeline = new ArrayList<>();
 
-        // Add relevant guest events
         for (KernelEventInfo guestEvent : relevantGuestEvents) {
             timeline.add(new TimedEvent(guestEvent, EventType.GUEST));
         }
 
-        // Add relevant VM transitions
         for (KernelEventInfo vmEvent : relevantVmTransitions) {
             timeline.add(new TimedEvent(vmEvent, isVMExit(vmEvent) ? EventType.VM_EXIT : EventType.VM_ENTRY));
         }
 
-        // Add other host events
         for (KernelEventInfo hostEvent : otherHostEvents) {
             timeline.add(new TimedEvent(hostEvent, EventType.HOST));
         }
 
-        // Step 7: Sort by timestamp
+        // Step 8: Sort by timestamp
         timeline.sort(Comparator.comparing(te -> te.event.timestamp));
 
-        // Step 8: Process events chronologically, tracking VM execution state
-        boolean inGuestMode = false;
-        long lastVMExitTimestamp = -1;
-        Integer vmExitCpuId = null; // Track which physical CPU handled the VM exit
+        // Step 9: Process events chronologically with migration awareness
+        VMExecutionState vmState = new VMExecutionState();
 
         for (TimedEvent timedEvent : timeline) {
             KernelEventInfo event = timedEvent.event;
 
             switch (timedEvent.type) {
                 case VM_ENTRY:
-                    inGuestMode = true;
-                    vmExitCpuId = null; // Clear the exit CPU tracking
-                    processFlow.addVMTransition(event, false); // false = entry
+                    vmState.enterGuest(event);
+                    processFlow.addVMTransition(event, false);
                     System.out.printf("VM_ENTRY: vCPU %d -> CPU %d at %d\n", //$NON-NLS-1$
                                      event.vcpuid, event.cpuid, event.timestamp);
                     break;
 
                 case VM_EXIT:
-                    inGuestMode = false;
-                    lastVMExitTimestamp = event.timestamp;
-                    vmExitCpuId = event.cpuid; // Remember which physical CPU handled this exit
-                    processFlow.addVMTransition(event, true); // true = exit
+                    vmState.exitGuest(event);
+                    processFlow.addVMTransition(event, true);
                     System.out.printf("VM_EXIT: vCPU %d from CPU %d at %d (reason: %s)\n", //$NON-NLS-1$
                                      event.vcpuid, event.cpuid, event.timestamp, event.exitReason);
                     break;
 
                 case GUEST:
-                    // Guest events should only be added if we're in guest mode
-                    if (inGuestMode) {
-                        // Already added in step 2, but we could add validation here
-                        System.out.printf("GUEST: %s (TID:%d) at %d\n", //$NON-NLS-1$
-                                         event.name, event.tid, event.timestamp);
+                    if (vmState.isInGuest()) {
+                        System.out.printf("GUEST: %s (TID:%d, CPU:%d->vCPU:%d) at %d\n", //$NON-NLS-1$
+                                         event.name, event.tid, event.cpuid, targetVcpuId, event.timestamp);
+                        //processFlow.addGuestEvent(event);
                     } else {
                         System.err.printf("Warning: Guest event outside VM execution: %s at %d\n", //$NON-NLS-1$
                                          event.name, event.timestamp);
@@ -931,20 +910,68 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
                     break;
 
                 case HOST:
-                    // Only add host events that occur during hypervisor overhead
-                    // (between VM exit and next VM entry) and on the same physical CPU
-                    if (!inGuestMode && lastVMExitTimestamp != -1 &&
-                        vmExitCpuId != null && event.cpuid == vmExitCpuId) {
-                        processFlow.addHypervisorEvent(event, lastVMExitTimestamp);
-                        System.out.printf("HOST: %s on CPU %d at %d (overhead)\n", //$NON-NLS-1$
-                                         event.name, event.cpuid, event.timestamp);
+                    if (vmState.isInHypervisorOverhead() &&
+                        isHostEventRelevant(event, vmState)) {
+                        processFlow.addHypervisorEvent(event, vmState.getLastExitTimestamp());
+                        System.out.printf("HOST: %s on CPU %d at %d (overhead for vCPU %d)\n", //$NON-NLS-1$
+                                         event.name, event.cpuid, event.timestamp, targetVcpuId);
                     }
-                    // Host events during guest execution or on different CPUs are ignored
                     break;
             default:
                 break;
             }
         }
+
+        processFlow.finalizeFlow();
+    }
+
+    // Helper class to track VM execution state with migration awareness
+    private static class VMExecutionState {
+        private boolean inGuest = false;
+        private long lastExitTimestamp = -1;
+        private int lastExitCpuId = -1;
+        private int currentPhysicalCpu = -1;
+
+        void enterGuest(KernelEventInfo vmEntry) {
+            inGuest = true;
+            currentPhysicalCpu = vmEntry.cpuid;
+            // Note: Physical CPU may have changed since last exit
+        }
+
+        void exitGuest(KernelEventInfo vmExit) {
+            inGuest = false;
+            lastExitTimestamp = vmExit.timestamp;
+            lastExitCpuId = vmExit.cpuid;
+            currentPhysicalCpu = vmExit.cpuid;
+        }
+
+        boolean isInGuest() {
+            return inGuest;
+        }
+
+        boolean isInHypervisorOverhead() {
+            return !inGuest && lastExitTimestamp != -1;
+        }
+
+        long getLastExitTimestamp() {
+            return lastExitTimestamp;
+        }
+
+        int getLastExitCpuId() {
+            return lastExitCpuId;
+        }
+    }
+
+    // Check if a host event is relevant during hypervisor overhead
+    private static boolean isHostEventRelevant(KernelEventInfo hostEvent, VMExecutionState vmState) {
+        // Accept events on the CPU that handled the VM exit
+        if (hostEvent.cpuid == vmState.getLastExitCpuId()) {
+            return true;
+        }
+
+        // TODO maybe there is more events
+
+        return false;
     }
 
     /**
@@ -998,50 +1025,6 @@ public class VMNativeStateProvider extends AbstractTmfStateProvider{
     }
 
 
-    // Helper class for VM transition pairs
-    /*private static class VMTransitionPair {
-        final KernelEventInfo exit;
-        final KernelEventInfo entry;
-
-        VMTransitionPair(KernelEventInfo exit, KernelEventInfo entry) {
-            this.exit = exit;
-            this.entry = entry;
-        }
-    }*/
-
-    // Build exit/entry pairs per vCPU
-    /*private static Map<Integer, List<VMTransitionPair>> buildTransitionPairs(List<KernelEventInfo> vmTransitions) {
-        Map<Integer, List<VMTransitionPair>> pairs = new HashMap<>();
-        Map<Integer, KernelEventInfo> pendingExits = new HashMap<>();
-
-        for (KernelEventInfo event : vmTransitions) {
-            int vcpu = event.vcpuid;
-
-            if (isVMExit(event)) {
-                pendingExits.put(vcpu, event);
-            } else if (isVMEntry(event)) {
-                KernelEventInfo exit = pendingExits.remove(vcpu);
-                if (exit != null) {
-                    pairs.computeIfAbsent(vcpu, k -> new ArrayList<>())
-                         .add(new VMTransitionPair(exit, event));
-                }
-            }
-        }
-        return pairs;
-    }*/
-
-    // Find the transition pair that contains or is closest to the guest event
-    /*private static VMTransitionPair findRelevantTransitionPair(List<VMTransitionPair> pairs,
-            long guestTime) {
-
-        for (VMTransitionPair pair : pairs) {
-            if (guestTime >= pair.exit.timestamp && guestTime <= pair.entry.timestamp) {
-                return pair;
-            }
-        }
-        return null;
-    }
-    */
     // Helper classes
     private static class TimedEvent {
         final KernelEventInfo event;
