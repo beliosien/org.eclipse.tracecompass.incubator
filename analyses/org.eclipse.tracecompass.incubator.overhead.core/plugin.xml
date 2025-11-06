@@ -12,7 +12,7 @@
       </view>
       <view
             category="org.eclipse.linuxtools.tmf.ui.views.category"
-            class="org.eclipse.tracecompass.incubator.overhead.ui.VMNativeComparisonView"
+            class="org.eclipse.tracecompass.incubator.overhead.ui.VMNativeComparisonFlameGraphView"
             id="org.eclipse.tracecompass.analysis.vmcomparison.ui.view"
             name="Comparison View"
             restorable="true">
@@ -23,6 +23,10 @@
       <dataProviderFactory
             class="org.eclipse.tracecompass.incubator.overhead.core.data.provider.KvmExitDataProviderFactory"
             id="org.eclipse.incubator.overhead.xy.rate.dataprovider">
+      </dataProviderFactory>
+      <dataProviderFactory
+            class="org.eclipse.tracecompass.incubator.overhead.core.data.provider.VMNativeDataProviderFactory"
+            id="org.eclipse.tracecompass.incubator.overhead.timegraph.dataprovider">
       </dataProviderFactory>
    </extension>
    <extension
@@ -45,10 +49,11 @@
       </output>
       <module
             analysis_module="org.eclipse.tracecompass.incubator.internal.overhead.core.analysis.VMNativeComparisonAnalysis"
+            applies_experiment="true"
             id="org.eclipse.tracecompass.analysis.vmcomparison"
             name="VM vs Native Comparison">
          <tracetype
-               class="org.eclipse.tracecompass.tmf.core.trace.TmfTrace">
+               class="org.eclipse.tracecompass.tmf.core.trace.experiment.TmfExperiment">
          </tracetype>
       </module>
       <output
@@ -58,6 +63,15 @@
                id="org.eclipse.tracecompass.analysis.vmcomparison">
          </analysisId>
       </output>
+      <module
+            analysis_module="org.eclipse.tracecompass.incubator.internal.overhead.core.analysis.VMNativeCallStackAnalysis"
+            applies_experiment="true"
+            id="org.eclipse.tracecompass.incubator.overhead.core.analysis.vm.native.callstack"
+            name="VM Native CallStack">
+         <tracetype
+               class="org.eclipse.tracecompass.analysis.os.linux.core.trace.IKernelTrace">
+         </tracetype>
+      </module>
    </extension>
 
 </plugin>

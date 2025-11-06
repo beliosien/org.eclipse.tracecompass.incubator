@@ -89,28 +89,28 @@ public class ProcessFlowInfo {
     /**
      * Add a VM exit/entry event - only accepts transitions for our target vCPU
      */
-    void addVMTransition(KernelEventInfo evt, boolean isExit) {
+    boolean addVMTransition(KernelEventInfo evt, boolean isExit) {
         if (!trackHypervisor) {
-            return;
+            return false;
         }
 
         // Only accept VM transitions for our target vCPU
         if (targetVcpuId != null && evt.vcpuid != targetVcpuId) {
-            return;
+            return false;
         }
 
         // If we haven't established the vCPU mapping yet, we can't correlate
         if (targetVcpuId == null) {
             // Store this transition in case we get the vCPU mapping later
             // For now, we'll skip it
-            return;
+            return false;
         }
 
         String key = (isExit ? "EXIT" : "ENTRY") + "_" + //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 evt.timestamp + "_" + evt.cpuid + "_" + evt.vcpuid + "_" + evt.tid; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         if (seenTransitions.contains(key)) {
-            return;
+            return false;
         }
         seenTransitions.add(key);
 
@@ -121,20 +121,22 @@ public class ProcessFlowInfo {
 
         System.out.printf("Added VM %s for vCPU %d at timestamp %d\n", //$NON-NLS-1$
                          isExit ? "EXIT" : "ENTRY", evt.vcpuid, evt.timestamp); //$NON-NLS-1$ //$NON-NLS-2$
+
+        return true;
     }
 
     /**
      * Add a hypervisor event - only accepts events on the CPU that received
      * the vCPU exit for our target thread
      */
-    void addHypervisorEvent(KernelEventInfo hypervisorEvt, long vmExitTimestamp) {
+    boolean addHypervisorEvent(KernelEventInfo hypervisorEvt, long vmExitTimestamp) {
         if (!trackHypervisor) {
-            return;
+            return false;
         }
 
         // We can only correlate hypervisor events if we know our target vCPU
         if (targetVcpuId == null) {
-            return;
+            return false;
         }
 
         // The hypervisor event should be on the same physical CPU that handled the VM exit
@@ -144,13 +146,15 @@ public class ProcessFlowInfo {
                 hypervisorEvt.timestamp + "_" + hypervisorEvt.cpuid + "_" + hypervisorEvt.tid; //$NON-NLS-1$ //$NON-NLS-2$
 
         if (seenTransitions.contains(key)) {
-            return;
+            return false;
         }
         seenTransitions.add(key);
 
         FlowEvent flowEvent = new FlowEvent(hypervisorEvt, FlowEventType.HYPERVISOR_EVENT);
         flowEvent.correlatedGuestTimestamp = vmExitTimestamp;
         unifiedFlow.add(flowEvent);
+
+        return true;
     }
 
     /**

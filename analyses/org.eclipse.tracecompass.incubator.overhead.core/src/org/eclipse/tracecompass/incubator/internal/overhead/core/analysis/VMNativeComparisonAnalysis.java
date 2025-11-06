@@ -36,8 +36,7 @@ public class VMNativeComparisonAnalysis extends TmfStateSystemAnalysisModule {
 
     @Override
     protected @NonNull String getFullHelpText() {
-        return "This analysis compare the execution of 2 traces and show where there is a performance" //$NON-NLS-1$
-                + "loss"; //$NON-NLS-1$
+        return "VM vs Native Flow Analysis"; //$NON-NLS-1$
     }
 
 }

@@ -16,9 +16,16 @@ Require-Bundle: org.eclipse.core.runtime,
  com.google.guava,
  org.eclipse.ui,
  org.eclipse.tracecompass.tmf.ui,
- org.eclipse.tracecompass.analysis.timing.core
+ org.eclipse.tracecompass.analysis.timing.core,
+ org.eclipse.tracecompass.incubator.callstack.core
 Export-Package: org.eclipse.tracecompass.incubator.internal.overhead.core;x-friends:="org.eclipse.tracecompass.incubator.overhead.core.tests"
 Automatic-Module-Name: org.eclipse.tracecompass.incubator.overhead.core
 Import-Package: org.eclipse.swtchart,
  org.eclipse.tracecompass.analysis.os.linux.core.trace,
- org.eclipse.tracecompass.analysis.timing.ui.views.segmentstore.density2
+ org.eclipse.tracecompass.analysis.profiling.core.callstack,
+ org.eclipse.tracecompass.analysis.profiling.core.instrumented,
+ org.eclipse.tracecompass.analysis.profiling.core.model,
+ org.eclipse.tracecompass.analysis.timing.ui.views.segmentstore.density2,
+ org.eclipse.tracecompass.internal.analysis.profiling.core.model,
+ org.eclipse.tracecompass.lttng2.ust.core.trace.layout,
+ org.eclipse.tracecompass.segmentstore.core
