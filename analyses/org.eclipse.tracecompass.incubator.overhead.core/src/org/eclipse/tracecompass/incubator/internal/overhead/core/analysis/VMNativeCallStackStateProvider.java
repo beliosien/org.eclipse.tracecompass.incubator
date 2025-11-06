@@ -27,6 +27,17 @@ import org.eclipse.tracecompass.tmf.core.trace.ITmfTrace;
  * use this as an example
  *  Timestamp   Channel CPU Event type  Contents    TID Prio    PID Source
 15:56:54.035 629 906    my_channel_0    0   syscall_entry_close fd=3, context.packet_seq_num=0, context.cpu_id=0, context._vtid=3422, context._vpid=3422, context._procname="sysbench", context._prio=20    3422    20  3422    [fs/open.c:0]
+
+ Timestamp  Channel CPU Event type  Contents    TID Prio    PID Source
+15:56:54.124 555 900    my_channel_2    2   syscall_entry_clone3    uargs=140729708442752, size=88, context.packet_seq_num=0, context.cpu_id=2, context._vtid=3422, context._vpid=3422, context._procname="sysbench", context._prio=20  3422    20  3422
+
+Timestamp   Channel CPU Event type  Contents    TID Prio    PID Source
+15:56:54.124 600 532    my_channel_2    2   syscall_exit_clone3 ret=3423, uargs=140729708442752, size=88, context.packet_seq_num=0, context.cpu_id=2, context._vtid=3422, context._vpid=3422, context._procname="sysbench", context._prio=20    3422    20  3422
+
+
+ *
+ *
+ *
  */
 
 public class VMNativeCallStackStateProvider extends CallStackStateProvider {
