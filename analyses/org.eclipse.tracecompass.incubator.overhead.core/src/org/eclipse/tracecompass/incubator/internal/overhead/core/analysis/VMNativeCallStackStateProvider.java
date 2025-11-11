@@ -2,6 +2,10 @@ package org.eclipse.tracecompass.incubator.internal.overhead.core.analysis;
 
 import static org.eclipse.tracecompass.common.core.NonNullUtils.checkNotNull;
 
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
 import java.util.Stack;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -23,23 +27,6 @@ import org.eclipse.tracecompass.tmf.core.trace.ITmfTrace;
  * @author philippe
  */
 
-/**
- * use this as an example
- *  Timestamp   Channel CPU Event type  Contents    TID Prio    PID Source
-15:56:54.035 629 906    my_channel_0    0   syscall_entry_close fd=3, context.packet_seq_num=0, context.cpu_id=0, context._vtid=3422, context._vpid=3422, context._procname="sysbench", context._prio=20    3422    20  3422    [fs/open.c:0]
-
- Timestamp  Channel CPU Event type  Contents    TID Prio    PID Source
-15:56:54.124 555 900    my_channel_2    2   syscall_entry_clone3    uargs=140729708442752, size=88, context.packet_seq_num=0, context.cpu_id=2, context._vtid=3422, context._vpid=3422, context._procname="sysbench", context._prio=20  3422    20  3422
-
-Timestamp   Channel CPU Event type  Contents    TID Prio    PID Source
-15:56:54.124 600 532    my_channel_2    2   syscall_exit_clone3 ret=3423, uargs=140729708442752, size=88, context.packet_seq_num=0, context.cpu_id=2, context._vtid=3422, context._vpid=3422, context._procname="sysbench", context._prio=20    3422    20  3422
-
-
- *
- *
- *
- */
-
 public class VMNativeCallStackStateProvider extends CallStackStateProvider {
 
     private static final int VERSION = 1;
@@ -59,6 +46,10 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
     private boolean beginNative = true;
     private String processName = ""; //$NON-NLS-1$
     private String threadName = ""; //$NON-NLS-1$
+
+
+    // Process Tree tracker
+    private ProcessTree processTree = new ProcessTree();
 
     // Tracking state of the vm
     private VMExecutionState vmState = new VMExecutionState();
@@ -126,14 +117,27 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
 
     @Override
     public @Nullable String getThreadName(@NonNull ITmfEvent event) {
-
         String traceName = event.getTrace().getName();
 
-        // For all host event we just want to put them under the guest thread
+        // For host events, use guest thread name
         if (traceName.toLowerCase().contains("vm/host") && vmState.isInHypervisorOverhead()) { //$NON-NLS-1$
             return threadName;
         }
 
+        // NEW: For events in our process tree, show individual threads
+        // but they'll be grouped under the same process name
+        Integer pid = getIntField(event, PID);
+        if (pid != null && nativeStart != null && processTree.isInTree(pid)) {
+            long tid = getThreadId(event);
+
+            // Optional: Label parent vs child
+            if (pid == nativeStart.pid) {
+                return getProcessName(event) + "-" + Long.toString(tid); //$NON-NLS-1$
+            }
+            return getProcessName(event) + "-" + Long.toString(tid); //$NON-NLS-1$
+        }
+
+        // Fallback: standard naming
         String procName = getProcessName(event);
         long tid = getThreadId(event);
         return procName + "-" + Long.toString(tid); //$NON-NLS-1$
@@ -142,8 +146,7 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
     @Override
     public @Nullable ITmfStateValue functionEntry(@NonNull ITmfEvent event) {
         String eventName = event.getName();
-        long timestamp = event.getTimestamp().toNanos();
-
+        //long timestamp = event.getTimestamp().toNanos();
 
         if (isSystemCallEntry(eventName)) {
             // System call entry - push syscall name
@@ -161,12 +164,16 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
             String interruptName = "IRQ_" + extractInterruptInfo(event); //$NON-NLS-1$
             return TmfStateValue.newValueString(interruptName);
 
-        }  else if (isPunctualEvent(eventName)) {
+        }
+
+        // remove the handling of punctual event for now
+        /*else if (isPunctualEvent(eventName)) {
             // Traiter les événements ponctuels
-            pendingPunctualEvents.push(new PendingEvent(eventName, timestamp));
+            Integer pid = getIntField(event, PID);
+            pendingPunctualEvents.push(new PendingEvent(eventName, timestamp, pid));
             return TmfStateValue.newValueString(eventName);
 
-        }
+        }*/
 
         return null;
     }
@@ -189,15 +196,16 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
         return null;
     }
 
-    private void closePendingPunctualEvent(ITmfEvent event) {
+    /*private void closePendingPunctualEvent(ITmfEvent event) {
         PendingEvent pendingEvent = null;
 
         if (!pendingPunctualEvents.empty()) {
             pendingEvent = pendingPunctualEvents.pop();
         }
 
+        Integer pid = getIntField(event, PID);
 
-        if (pendingEvent != null) {
+        if (pendingEvent != null && pid != null && pid.equals(pendingEvent.pid)) {
 
             long currentTimestamp = event.getTimestamp().toNanos();
             long duration = currentTimestamp - pendingEvent.startTimestamp;
@@ -216,7 +224,7 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
 
             ss.popAttribute(closeTimestamp, quark);
         }
-    }
+    }*/
 
     private void processHypervisorEvent(@NonNull ITmfEvent event) {
         // we will treat entry/exit as punctual event because we want to see them and the
@@ -224,6 +232,7 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
         String eventName = event.getName();
         long timestamp = event.getTimestamp().toNanos();
         Integer vcpuid = getIntField(event, VCPUID);
+        Integer pid = getIntField(event, PID);
 
         if (vcpuid == null || vcpuid != this.vmState.getCurrentVirtualCpu()) {
             return;
@@ -247,21 +256,22 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
         int callStackQuark = ss.getQuarkRelativeAndAdd(threadQuark, CallStackAnalysis.CALL_STACK);
         ss.pushAttribute(timestamp, eventName, callStackQuark);
 
-        pendingPunctualEvents.push(new PendingEvent(eventName, timestamp));
+        pendingPunctualEvents.push(new PendingEvent(eventName, timestamp, pid));
     }
 
-    private static boolean isPunctualEvent(String eventName) {
+    // for now i will remove the processing of punctual events too much bugs
+    /*private static boolean isPunctualEvent(String eventName) {
         return !isSystemCall(eventName) && !isInterrupt(eventName);
-    }
+    }*/
 
-    private static boolean isSystemCall(String eventName) {
+    /*private static boolean isSystemCall(String eventName) {
         return eventName.startsWith("syscall_"); //$NON-NLS-1$
     }
 
     private static boolean isInterrupt(String eventName) {
         return eventName.contains("irq_handler_") || eventName.contains("softirq_"); //$NON-NLS-1$ //$NON-NLS-2$
 
-    }
+    }*/
 
     // Helper methods for event classification
     private static boolean isWorkloadMarker(ITmfEvent event) {
@@ -295,6 +305,12 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
             nativeStart = new SyncPoint("workload_start", timestamp,  //$NON-NLS-1$
                     pid != null ? pid : -1,  tid,
                             processName);
+
+            // Register this as the root PID of our workload
+            if (pid != null) {
+                processTree.SetRootPid(pid);
+            }
+
             beginNative = false;
             this.vmState.enterGuest(vcpuid != null ? vcpuid : -1);
         } else {
@@ -386,6 +402,8 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
             return null;
         }
         String value = obj.toString();
+
+        // standard field format: "field=value"
         String[] words = value.split("="); //$NON-NLS-1$
         if (words.length != 2) {
             return null;
@@ -449,8 +467,13 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
         // Only process events within the analysis window and for the target PID
         if (nativeStart != null) {
 
+            // Always track clone events to build the tree
+            if (traceName.toLowerCase().contains("vm/guest")) { //$NON-NLS-1$
+                trackCloneEvent(event);
+            }
+
             // First you close pending punctual event if necessary
-            closePendingPunctualEvent(event);
+            //closePendingPunctualEvent(event);
 
             // And then you decide if the next event is worth considering
 
@@ -459,7 +482,7 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
 
             // Guest events - filter by PID
             if (traceName.toLowerCase().contains("vm/guest")) { //$NON-NLS-1$
-                if (pid != null && pid.equals(nativeStart.pid)) {
+                if (pid != null && processTree.isInTree(pid)) {
                     return (nativeEnd == null || timestamp <= nativeEnd.timestamp);
                 }
 
@@ -502,13 +525,17 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
 
         // Process events within analysis window
         if (nativeStart != null) {
-            closePendingPunctualEvent(event);
+
+         // Always track clone events to build the tree
+            trackCloneEvent(event);
+
+            //closePendingPunctualEvent(event);
 
             Integer pid = getIntField(event, PID);
             long timestamp = event.getTimestamp().toNanos();
 
             // Accept all events for our target PID
-            if (pid != null && pid.equals(nativeStart.pid)) {
+            if (pid != null && processTree.isInTree(pid)) {
                 return (nativeEnd == null || timestamp <= nativeEnd.timestamp);
             }
         }
@@ -518,15 +545,21 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
 
     @Override
     protected String getProcessName(ITmfEvent event) {
-
         String traceName = event.getTrace().getName();
 
-        // use the guest process name for host events
+        // Use the guest process name for host events
         if (traceName.toLowerCase().contains("vm/host") && vmState.isInHypervisorOverhead()) { //$NON-NLS-1$
             return processName;
         }
 
+        // NEW: For events in our process tree, use the root process name
+        Integer pid = getIntField(event, PID);
+        if (pid != null && nativeStart != null && processTree.isInTree(pid)) {
+            // All processes in the tree use the root process name
+            return nativeStart.procName;
+        }
 
+        // Fallback: standard naming
         Object commField = event.getContent().getField(PROCESS_NAME);
         if (commField == null) {
             return "unknown"; //$NON-NLS-1$
@@ -538,6 +571,44 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
         }
         return words[1];
     }
+
+    /**
+     * Track clone/fork events to build process tree
+     * Only tracks clones where the parent is already in our tree
+     */
+    private void trackCloneEvent(@NonNull ITmfEvent event) {
+        String eventName = event.getName();
+
+        // Handle both clone() and clone3()
+        if (eventName.equals("syscall_exit_clone") || //$NON-NLS-1$
+            eventName.equals("syscall_exit_clone3")) { //$NON-NLS-1$
+
+            Integer parentPid = getIntField(event, PID);
+            Integer childPid = getIntField(event, "ret"); //$NON-NLS-1$
+
+            // TODO: Little hack that I am adding but i need to find a way to detect the process/thread that
+            // does the work we want to analyze
+            // String procName = getProcessName(event);
+
+            if (parentPid != null && childPid != null && childPid > 0) {
+
+                // NEW: Only register if parent is already in our tree
+                if (processTree.isInTree(parentPid)) {
+                    processTree.registerClone(parentPid, childPid);
+
+                    // Debug logging (optional)
+                    System.out.println(String.format(
+                        "[ProcessTree] Clone tracked: %d -> %d (tree size: %d)", //$NON-NLS-1$
+                        parentPid, childPid, processTree.getAllPids().size()
+                    ));
+                } else {
+                    // Debug: See what we're ignoring
+                    // System.out.println("[ProcessTree] Ignored clone from PID " + parentPid);
+                }
+            }
+        }
+    }
+
 
     private static class SyncPoint {
         final String eventType;
@@ -559,10 +630,12 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
     private static class PendingEvent {
         String eventName;
         long startTimestamp;
+        Integer pid;
 
-        PendingEvent(String eventName, long startTimestamp) {
+        PendingEvent(String eventName, long startTimestamp, Integer pid) {
             this.eventName = eventName;
             this.startTimestamp = startTimestamp;
+            this.pid = pid;
         }
     }
 
@@ -610,5 +683,79 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
     private enum EnvironmentType {
         VIRTUALIZED,
         NATIVE
+    }
+
+
+    /**
+     * Tracks process hierachy through clone/fork events
+     */
+    private static class ProcessTree {
+        private final Map<Integer, Integer> childToParent = new HashMap<>();
+        private final Map<Integer, Set<Integer>> parentToChildren = new HashMap<>();
+        private int rootPid = -1;
+
+        /**
+         * Register a clone/fork event
+         */
+        void registerClone(int parentPid, int childPid) {
+            childToParent.put(childPid, parentPid);
+            parentToChildren.computeIfAbsent(parentPid, k -> new HashSet<>()).add(childPid);
+        }
+
+        /**
+         * Set root
+         */
+        void SetRootPid(int pid) {
+            this.rootPid = pid;
+        }
+
+        /**
+         * Check if a PID belongs to the process tree
+         */
+        boolean isInTree(int pid) {
+            if (rootPid == -1) {
+                return false;
+            }
+
+            if (pid == rootPid) {
+                return true;
+            }
+
+            return isDescendant(pid, rootPid);
+        }
+
+        private boolean isDescendant(int pid, int ancestorPid) {
+            Integer parent = childToParent.get(pid);
+            if (parent == null) {
+                return false;
+            }
+
+            if (parent == ancestorPid) {
+                return true;
+            }
+
+            return isDescendant(parent, ancestorPid);
+        }
+
+        /**
+         * Get all PIDs in the tree (for debugging)
+         */
+        Set<Integer> getAllPids() {
+            Set<Integer> allPids = new HashSet<>();
+            if (rootPid != -1) {
+                collectAllPids(rootPid, allPids);
+            }
+            return allPids;
+        }
+
+        private void collectAllPids(int pid, Set<Integer> result) {
+            result.add(pid);
+            Set<Integer> children = parentToChildren.get(pid);
+            if (children != null) {
+                for (int child : children) {
+                    collectAllPids(child, result);
+                }
+            }
+        }
     }
 }
