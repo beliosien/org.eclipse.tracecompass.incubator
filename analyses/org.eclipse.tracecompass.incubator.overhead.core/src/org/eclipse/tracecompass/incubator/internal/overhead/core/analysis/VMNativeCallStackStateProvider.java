@@ -586,10 +586,6 @@ public class VMNativeCallStackStateProvider extends CallStackStateProvider {
             Integer parentPid = getIntField(event, PID);
             Integer childPid = getIntField(event, "ret"); //$NON-NLS-1$
 
-            // TODO: Little hack that I am adding but i need to find a way to detect the process/thread that
-            // does the work we want to analyze
-            // String procName = getProcessName(event);
-
             if (parentPid != null && childPid != null && childPid > 0) {
 
                 // NEW: Only register if parent is already in our tree
